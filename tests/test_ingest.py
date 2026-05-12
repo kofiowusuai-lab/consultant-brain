@@ -245,6 +245,70 @@ def test_run_ingest_re_ingest_overwrites_atom_body(tmp_path: Path) -> None:
     assert "v1 summary" not in call_text
 
 
+def test_run_ingest_stamps_crm_org_id_when_resolver_finds_match(tmp_path: Path) -> None:
+    """Phase 8: ingest resolves client → CRM UUID via the resolver and
+    stamps every atom with it."""
+    import sqlite3
+    from uuid import UUID
+
+    from consultant_brain.crm.resolver import CRMResolver
+
+    # Build a fake CRM with one org for Reece.
+    crm_path = tmp_path / "crm.sqlite"
+    conn = sqlite3.connect(str(crm_path))
+    conn.executescript(
+        """
+        CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, domain TEXT, created_at TEXT, updated_at TEXT);
+        INSERT INTO organizations VALUES ('aabbccdd-1234-5678-9abc-def012345678', 'Reece', NULL, '', '');
+        """
+    )
+    conn.commit()
+    conn.close()
+    resolver = CRMResolver(crm_path=crm_path)
+
+    result = run_ingest(
+        session_path=FIXTURE,
+        client_name="Reece",
+        call_type="consultingCall",
+        vault_root=tmp_path / "vault",
+        redact=False,
+        dry_run=False,
+        client=_MockClient(VALID_RESPONSE),
+        crm_resolver=resolver,
+    )
+    layout = VaultLayout.for_root(tmp_path / "vault")
+    expected_uuid = UUID("aabbccdd-1234-5678-9abc-def012345678")
+    for atom_path in layout.atoms_dir.glob("*.md"):
+        fm = read_frontmatter(atom_path)
+        assert fm.get("client_org_id") == str(expected_uuid), \
+            f"expected stamp on {atom_path.name}, got {fm.get('client_org_id')!r}"
+
+
+def test_run_ingest_skips_crm_stamp_when_no_match(tmp_path: Path) -> None:
+    """No CRM row → atom has client_org_id absent (or null). Ingest
+    still succeeds — the link is a best-effort enhancement."""
+    from consultant_brain.crm.resolver import CRMResolver
+
+    resolver = CRMResolver(crm_path=tmp_path / "doesnt-exist.sqlite")
+    result = run_ingest(
+        session_path=FIXTURE,
+        client_name="NeverInCRM",
+        call_type="consultingCall",
+        vault_root=tmp_path / "vault",
+        redact=False,
+        dry_run=False,
+        client=_MockClient(VALID_RESPONSE),
+        crm_resolver=resolver,
+    )
+    layout = VaultLayout.for_root(tmp_path / "vault")
+    atom_files = list(layout.atoms_dir.glob("*.md"))
+    assert atom_files
+    for atom_path in atom_files:
+        fm = read_frontmatter(atom_path)
+        # client_org_id either absent (stripped because None) or empty.
+        assert fm.get("client_org_id") in (None, "", "null")
+
+
 def test_run_ingest_atom_ids_depend_on_session_filename(tmp_path: Path) -> None:
     """Different session files MUST produce different atom IDs even if the
     extractor returns identical atoms — otherwise re-ingesting call B would

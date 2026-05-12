@@ -16,6 +16,7 @@ from pathlib import Path
 
 import typer
 
+from consultant_brain.crm.resolver import CRMResolver
 from consultant_brain.extractor import (
     AnthropicClient,
     extract,
@@ -75,6 +76,7 @@ def run_ingest(
     redact: bool,
     dry_run: bool,
     client: AnthropicClient | None = None,
+    crm_resolver: CRMResolver | None = None,
 ) -> IngestResult:
     """Ingest one session JSON into the vault.
 
@@ -100,6 +102,14 @@ def run_ingest(
         ) from exc
 
     config = IngestConfig(client_name=client_name, call_type=call_type_enum, redact=redact, dry_run=dry_run)
+
+    # Phase 8: try to link this client to the Swift CRM. Resolver returns
+    # None when the CRM doesn't have the client yet — atoms still write,
+    # just without a stable UUID. A later distill pass can backfill if
+    # the client gets added in the CRM.
+    resolver = crm_resolver or CRMResolver()
+    org = resolver.resolve(client_name)
+    client_org_id = org.id if org else None
 
     loaded = load_session(session_path)
     transcript_for_extraction = _maybe_redact(loaded.transcript, client_name) if redact else loaded.transcript
@@ -132,6 +142,7 @@ def run_ingest(
                 id=atom_id,
                 type=extracted.type,
                 client=client_name,
+                client_org_id=client_org_id,
                 call=call_id,
                 call_type=call_type_enum,
                 tags=list(extracted.tags),
