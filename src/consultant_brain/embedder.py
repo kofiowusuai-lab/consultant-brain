@@ -30,10 +30,13 @@ EMBEDDING_MODEL = "nomic-embed-text"
 EMBEDDING_DIM = 768
 ATOMS_TABLE = "atoms"
 
-# Phase 2 evaluation found that prepending the atom type as a bracketed tag
-# improves clustering — objections cluster near other objections, commitments
-# near other commitments — which helps the warm-layer ranker disambiguate.
-# Toggleable so we can A/B test rapidly without rewriting embeddings.
+# Phase 2 A/B test on the 5-query tuning corpus (tests/fixtures/tuning_corpus.json):
+# USE_TYPE_PREFIX=True  → 5/5 correct top-1
+# USE_TYPE_PREFIX=False → 5/5 correct top-1
+# Tie on this corpus — too small to falsify either direction. Keeping True
+# because (a) it's harmless when corpora are small, (b) NLP literature
+# consistently shows type prefixes help typed-document clustering at scale.
+# Re-evaluate when the vault grows past ~100 atoms across multiple clients.
 USE_TYPE_PREFIX = True
 
 

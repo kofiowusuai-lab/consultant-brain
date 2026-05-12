@@ -1,0 +1,93 @@
+{
+  "description": "Phase 2 retrieval tuning corpus. Each seed atom is hand-crafted so the queries below have a deterministic expected top-1. If retrieval changes (new ranker, new embedding model, new tuning constants), running this corpus tells you immediately whether quality moved forward or backward.",
+  "atoms": [
+    {
+      "id": "TUNE_PRICE_ANCHOR_AAAAAAAAA1",
+      "type": "objection",
+      "client": "Reece",
+      "tags": ["budget", "anchor_risk"],
+      "confidence": 0.88,
+      "body": "Reece asked about ballpark cost in the first five minutes, before we discussed deliverables. Anchor risk: budget number sets mental ceiling regardless of value framing."
+    },
+    {
+      "id": "TUNE_FRIDAY_DELIVERY_AAAAAA02",
+      "type": "commitment",
+      "client": "Reece",
+      "tags": ["next_step", "deliverable"],
+      "confidence": 0.95,
+      "body": "Reece will send the three best manually-written ads from this quarter by Friday so we can reverse-engineer the winning rubric."
+    },
+    {
+      "id": "TUNE_VAULT_SIZE_AAAAAAAAAAA03",
+      "type": "client_fact",
+      "client": "Reece",
+      "tags": ["stack", "obsidian"],
+      "confidence": 0.92,
+      "body": "Reece has around 1000 notes in an Obsidian vault. The ad-bot drafts copy by pulling from those notes via retrieval."
+    },
+    {
+      "id": "TUNE_RETRIEVAL_BROKEN_AAAAA04",
+      "type": "objection",
+      "client": "Reece",
+      "tags": ["retrieval", "tagging"],
+      "confidence": 0.90,
+      "body": "The ad-bot grabs wrong source notes — pulls a six-month-old note when a fresher one exists. No tagging system; the vault is organized by timestamp and title only."
+    },
+    {
+      "id": "TUNE_WINNING_AD_UNDEFINED_AA05",
+      "type": "insight",
+      "client": "Reece",
+      "tags": ["framing", "scope_gap"],
+      "confidence": 0.85,
+      "body": "Reece hasn't defined what a 'winning ad' looks like. He knows the manually-written ones convert 2.3x better but can't articulate the criteria. We're tuning blind until we name the rubric."
+    },
+    {
+      "id": "TUNE_TEAM_RESISTANCE_AAAAAA06",
+      "type": "loss_signal",
+      "client": "Reece",
+      "tags": ["adoption", "team"],
+      "confidence": 0.78,
+      "body": "Reece deflected the question about who on his team would own the ad-bot tooling day to day. Suggests team adoption risk that hasn't been addressed."
+    },
+    {
+      "id": "TUNE_ENTHUSIASM_PILOT_AAAAA07",
+      "type": "win_signal",
+      "client": "Reece",
+      "tags": ["enthusiasm", "pilot"],
+      "confidence": 0.90,
+      "body": "When the 10-day pilot at $12k fixed was floated, Reece said 'that's actually really fair' — strong buying signal on the pilot frame."
+    }
+  ],
+  "queries": [
+    {
+      "name": "price_question",
+      "window": "what does this cost like ballpark for a full engagement",
+      "expected_top_atom_id": "TUNE_PRICE_ANCHOR_AAAAAAAAA1",
+      "rationale": "Window mentions cost + ballpark; the price-anchor atom uses the exact same words."
+    },
+    {
+      "name": "retrieval_complaint",
+      "window": "the agent keeps grabbing the wrong notes from the vault, pulling old stuff instead of recent",
+      "expected_top_atom_id": "TUNE_RETRIEVAL_BROKEN_AAAAA04",
+      "rationale": "Direct semantic match on retrieval problems with wrong notes."
+    },
+    {
+      "name": "next_step_commitment",
+      "window": "okay so what are you going to send me by end of week",
+      "expected_top_atom_id": "TUNE_FRIDAY_DELIVERY_AAAAAA02",
+      "rationale": "Window about deliverables by week-end matches the Friday commitment."
+    },
+    {
+      "name": "definition_of_done",
+      "window": "before we build anything we need to define what a good ad even looks like",
+      "expected_top_atom_id": "TUNE_WINNING_AD_UNDEFINED_AA05",
+      "rationale": "Defining winning criteria — semantic match on the framing insight."
+    },
+    {
+      "name": "stack_check",
+      "window": "where do you store your notes and how big is your knowledge base",
+      "expected_top_atom_id": "TUNE_VAULT_SIZE_AAAAAAAAAAA03",
+      "rationale": "Stack/storage question maps to the vault-size fact."
+    }
+  ]
+}
