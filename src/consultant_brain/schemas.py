@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -132,6 +133,11 @@ class Atom(BaseModel):
     id: str = Field(min_length=8, max_length=64)
     type: AtomType
     client: Optional[str] = None  # display name; vault writer renders as `[[<name>]]`
+    # Phase 8: stable UUID linking this atom to the Swift app's CRMOrganization
+    # row. Populated at ingest/live-finalize time when the resolver can match
+    # the display name; None otherwise so the atom stays usable even before
+    # the CRM record exists (the resolver fills it in on the next distill pass).
+    client_org_id: Optional[UUID] = None
     call: str  # call note ID this atom was extracted from; renders as `[[<call>]]`
     call_type: CallType
     tags: list[str] = Field(default_factory=list)

@@ -210,6 +210,9 @@ def _render_atom_markdown(atom: Atom) -> str:
         "id": atom.id,
         "type": atom.type.value,
         "client": f"[[{atom.client}]]" if atom.client else None,
+        # Phase 8: persist the CRM UUID as a plain string so the YAML stays
+        # human-readable. Read path coerces back into UUID via Pydantic.
+        "client_org_id": str(atom.client_org_id) if atom.client_org_id else None,
         "call": f"[[{atom.call}]]",
         "call_type": atom.call_type.value,
         "tags": list(atom.tags),

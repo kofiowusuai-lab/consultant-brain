@@ -100,6 +100,7 @@ def _atom_from_markdown(path: Path) -> Atom:
         id=meta["id"],
         type=AtomType(meta["type"]),
         client=_strip_wikilink(meta.get("client")),
+        client_org_id=_coerce_uuid(meta.get("client_org_id")),
         call=_strip_wikilink(meta["call"]),
         call_type=CallType(meta["call_type"]),
         tags=list(meta.get("tags") or []),
@@ -136,3 +137,17 @@ def _coerce_datetime(value) -> _datetime:
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     return _datetime.fromisoformat(s)
+
+
+def _coerce_uuid(value):
+    """Phase 8: handle client_org_id round-tripping through YAML. Pydantic
+    coerces from str → UUID automatically when the value is non-empty."""
+    if value in (None, "", "null"):
+        return None
+    from uuid import UUID as _UUID
+    if isinstance(value, _UUID):
+        return value
+    try:
+        return _UUID(str(value))
+    except (ValueError, AttributeError):
+        return None

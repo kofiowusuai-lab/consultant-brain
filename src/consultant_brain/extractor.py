@@ -190,7 +190,7 @@ def extract(
     client_name: str | None,
     client: AnthropicClient,
     model: str = DEFAULT_EXTRACTOR_MODEL,
-    max_tokens: int = 4096,
+    max_tokens: int = 8192,
 ) -> ExtractorResult:
     """Send the transcript to Claude, parse the response, validate against
     `ExtractorResult`. Raises on any deviation — never returns partial data.

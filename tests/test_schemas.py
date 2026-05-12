@@ -156,6 +156,26 @@ def test_atom_evidence_count_minimum_is_one() -> None:
         Atom.model_validate(_atom_payload(evidence_count=0))
 
 
+def test_atom_client_org_id_round_trips_uuid() -> None:
+    """Phase 8: stable UUID linking atom → Swift CRMOrganization row."""
+    from uuid import UUID
+    payload = _atom_payload(client_org_id="00000000-0000-0000-0000-000000000a01")
+    atom = Atom.model_validate(payload)
+    assert atom.client_org_id == UUID("00000000-0000-0000-0000-000000000a01")
+    # Dump + re-validate to confirm it serializes back cleanly.
+    dumped = atom.model_dump(mode="json")
+    assert dumped["client_org_id"] == "00000000-0000-0000-0000-000000000a01"
+    assert Atom.model_validate(dumped) == atom
+
+
+def test_atom_client_org_id_optional_defaults_none() -> None:
+    payload = _atom_payload()
+    # No client_org_id key in the payload at all.
+    payload.pop("client_org_id", None)
+    atom = Atom.model_validate(payload)
+    assert atom.client_org_id is None
+
+
 def test_call_note_id_format_is_enforced() -> None:
     base = {
         "client": "Reece",
