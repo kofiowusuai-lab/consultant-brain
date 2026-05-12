@@ -52,6 +52,14 @@ class CallState:
     turns: deque[CallTurn] = field(default_factory=lambda: deque(maxlen=MAX_TURNS_PER_CALL))
     lock: threading.Lock = field(default_factory=threading.Lock)
 
+    # Phase 4 throttle state. The moment detector runs at most once per
+    # MOMENT_MIN_TURNS_BETWEEN_RUNS new turns AND MOMENT_MIN_SECONDS_BETWEEN_RUNS
+    # since the last run — so a rapid burst of short turns doesn't melt the
+    # Anthropic bill.
+    last_moment_detection_at: datetime | None = None
+    turns_at_last_detection: int = 0
+    detected_atom_count: int = 0  # cumulative — informational, surfaced in /healthz later
+
     def append_turn(self, speaker: Speaker, text: str, *, now: datetime | None = None) -> None:
         """Add a turn under lock. `deque(maxlen=N)` evicts the oldest entry
         automatically when we exceed MAX_TURNS_PER_CALL."""

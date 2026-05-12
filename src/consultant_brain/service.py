@@ -16,13 +16,15 @@ every 15s anyway, and the retrieval pipeline is sub-second).
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from consultant_brain.live_loop import maybe_run_moment_detection
 from consultant_brain.live_state import LiveCallRegistry
 from consultant_brain.retrieve import RankedHit, retrieve
 from consultant_brain.schemas import CallType, Speaker
@@ -140,9 +142,28 @@ def create_app(*, vault_root: Path | None = None, registry: LiveCallRegistry | N
 
     app.state.registry = registry or LiveCallRegistry()
     app.state.vault_root = resolved_vault
+    # Phase 4: live moment detection runs after each /transcript_delta when
+    # enabled. Off by default in tests (set via env in production). The env
+    # var lets the Swift app launch the service with detection enabled
+    # without code changes here.
+    app.state.moment_detection_enabled = os.environ.get(
+        "CONSULTANT_BRAIN_MOMENT_DETECTION", ""
+    ).lower() in ("1", "true", "yes", "on")
 
     _register_routes(app)
     return app
+
+
+def _run_moment_detection_safely(state, vault_root: Path) -> None:
+    """Run the live-loop detection pass, swallowing all errors so a single
+    background-task failure can never crash the worker / break /transcript_delta.
+    """
+    import logging
+
+    try:
+        maybe_run_moment_detection(state, vault_root=vault_root)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("background moment detection failed")
 
 
 def reload_app() -> FastAPI:
@@ -202,6 +223,8 @@ def _register_routes(app: FastAPI) -> None:
     @app.post("/transcript_delta", response_model=TranscriptDeltaResponse)
     def transcript_delta(
         body: TranscriptDeltaRequest,
+        background: BackgroundTasks,
+        request: Request,
         registry: LiveCallRegistry = Depends(get_registry),
     ) -> TranscriptDeltaResponse:
         state = registry.get(body.call_id)
@@ -211,6 +234,16 @@ def _register_routes(app: FastAPI) -> None:
                 detail=f"No active call with id={body.call_id!r}. POST /call_start first.",
             )
         state.append_turn(body.speaker, body.text)
+
+        # Phase 4: opportunistic live moment detection — scheduled as a
+        # background task so the HTTP response stays under 50ms. The
+        # throttle inside `maybe_run_moment_detection` enforces "at most
+        # one Anthropic call per N new turns + M seconds" so a chatty call
+        # doesn't melt the bill.
+        if request.app.state.moment_detection_enabled:
+            vault_root: Path = request.app.state.vault_root
+            background.add_task(_run_moment_detection_safely, state, vault_root)
+
         return TranscriptDeltaResponse(
             call_id=body.call_id, turn_count=len(state.turns), accepted=True
         )
