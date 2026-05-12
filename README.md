@@ -54,18 +54,62 @@ The Anthropic API key is read from the Swift app's `~/Library/Application Suppor
 
 ## Usage
 
+### Ingest + query (Phase 1)
+
 ```bash
 # Ingest a real call
 uv run consultant-brain ingest \
   --session "$HOME/Library/Application Support/Consultant Copilot/Sessions/session-2026-05-12T05-42-10Z.json" \
-  --client "Reece" \
-  --call-type consultingCall
+  --client "Reece" --call-type consultingCall
 
-# Query the brain
+# Vector search the vault
 uv run consultant-brain query "what did the client say about price"
+
+# Re-embed atoms missing from LanceDB (recovers from index wipes)
+uv run consultant-brain reindex
 ```
 
 After an ingest, open `~/ConsultantBrain/` in Obsidian — the new call note shows ~15-30 wikilinked atoms.
+
+### Three-layer suggest (Phase 2)
+
+```bash
+uv run consultant-brain suggest \
+  --window "the bot keeps grabbing the wrong notes from our vault" \
+  --client "Reece" --call-type consultingCall \
+  --explain
+```
+
+Returns the panel slice the live copilot would show: 1 hot + 2 warm + 1 cold atom by default. `--explain` prints rank components (similarity / recency / confidence / final score).
+
+### FastAPI service (Phase 3)
+
+The Swift app + Phase 4's live loop talk to the brain over HTTP.
+
+```bash
+uv run consultant-brain serve            # localhost:8787 by default
+
+curl http://127.0.0.1:8787/healthz
+curl -X POST http://127.0.0.1:8787/call_start \
+  -H 'Content-Type: application/json' \
+  -d '{"call_id":"abc","client":"Reece","call_type":"consultingCall"}'
+curl -X POST http://127.0.0.1:8787/transcript_delta \
+  -H 'Content-Type: application/json' \
+  -d '{"call_id":"abc","speaker":"them","text":"the bot keeps grabbing wrong notes"}'
+curl 'http://127.0.0.1:8787/suggestions?call_id=abc' | jq
+curl -X POST http://127.0.0.1:8787/call_end \
+  -H 'Content-Type: application/json' \
+  -d '{"call_id":"abc"}'
+```
+
+Endpoints:
+- `GET /healthz` — liveness + active-call count + vault path
+- `POST /call_start` — `{ call_id, client, call_type }`
+- `POST /transcript_delta` — `{ call_id, speaker: "you"|"them", text }`
+- `GET /suggestions?call_id=X[&hot=1&warm=2&cold=1]` — panel slice
+- `POST /call_end` — `{ call_id }`
+
+Port 8787 by default (not 8765 — that's OpenClaw's shared swap port). `--reload` for dev auto-reload.
 
 ## Tests
 
@@ -73,8 +117,8 @@ After an ingest, open `~/ConsultantBrain/` in Obsidian — the new call note sho
 uv run pytest
 ```
 
-Tests with the `live` marker actually hit the Anthropic API; CI runs without `--run-live` by default.
+`@requires_ollama` tests skip cleanly when Ollama isn't running locally. CI without Ollama still gets 90+ tests covering schemas, vault writes, ingest plumbing, retrieval ranking, and the service.
 
 ## Out of scope this phase
 
-FastAPI service · live 15s loop · auto-scoring · pattern distillation · context.md auto-regen · stakeholder graph · weekly reviews · CRM linking. Each gets its own plan when we ship it.
+Swift app integration · live 15s loop · auto-scoring · pattern distillation · context.md auto-regen · stakeholder graph · weekly reviews · CRM linking. Each gets its own plan when we ship it.

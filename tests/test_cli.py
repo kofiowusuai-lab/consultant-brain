@@ -33,6 +33,13 @@ def test_reindex_help_shows_force_flag() -> None:
     assert "--vault" in result.output
 
 
+def test_serve_help_shows_network_flags() -> None:
+    result = runner.invoke(app, ["serve", "--help"])
+    assert result.exit_code == 0, result.output
+    for flag in ("--host", "--port", "--vault", "--reload"):
+        assert flag in result.output, f"missing flag: {flag}"
+
+
 def test_ingest_help_shows_required_flags() -> None:
     result = runner.invoke(app, ["ingest", "--help"])
     assert result.exit_code == 0, result.output

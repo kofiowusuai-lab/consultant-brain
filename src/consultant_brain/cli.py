@@ -185,5 +185,52 @@ def reindex(
     typer.echo(summary.summary_line())
 
 
+@app.command()
+def serve(
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Bind address. Defaults to localhost — never expose the brain to the LAN without auth (none in Phase 3).",
+    ),
+    port: int = typer.Option(
+        8787,
+        "--port",
+        "-p",
+        help="TCP port. Default 8787 — staying off 8765 which is shared by other OpenClaw services.",
+    ),
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    reload: bool = typer.Option(
+        False,
+        "--reload",
+        help="Enable uvicorn auto-reload on file changes. Dev-only — slower start, restarts on save.",
+    ),
+) -> None:
+    """Launch the FastAPI brain service. The Swift app + Phase 4's live loop
+    talk to this over HTTP at http://127.0.0.1:<port>.
+    """
+    import uvicorn
+
+    from consultant_brain.service import create_app
+
+    if reload:
+        # uvicorn.run with --reload needs an import string, not an instance,
+        # so the worker process can re-import after a file change.
+        import os
+
+        os.environ["CONSULTANT_BRAIN_VAULT"] = str(vault.expanduser().resolve())
+        typer.echo(f"Reload mode — vault: {os.environ['CONSULTANT_BRAIN_VAULT']}")
+        uvicorn.run(
+            "consultant_brain.service:reload_app",
+            host=host,
+            port=port,
+            reload=True,
+        )
+    else:
+        # Build the app once + hand it to uvicorn — fastest startup.
+        api = create_app(vault_root=vault)
+        typer.echo(f"Consultant Brain ready on http://{host}:{port}  ·  vault: {vault}")
+        uvicorn.run(api, host=host, port=port, log_level="info")
+
+
 if __name__ == "__main__":
     app()
