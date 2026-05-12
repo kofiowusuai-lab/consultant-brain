@@ -28,6 +28,14 @@ from consultant_brain.live_loop import maybe_run_moment_detection
 from consultant_brain.live_state import LiveCallRegistry
 from consultant_brain.retrieve import RankedHit, retrieve
 from consultant_brain.schemas import CallType, Speaker
+from consultant_brain.scoring.corrections import (
+    ScoreCorrection,
+    append_correction,
+)
+from consultant_brain.scoring.features import FEATURE_NAMES, compute_features
+from consultant_brain.scoring.loader import CallNotFoundError, load_call_for_scoring
+from consultant_brain.scoring.score import compute_score
+from consultant_brain.scoring.weights import ScoringWeightsTable
 
 
 DEFAULT_VAULT = Path.home() / "ConsultantBrain"
@@ -115,6 +123,42 @@ class SuggestionsResponse(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Scoring DTOs (Phase 5)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class FeatureContributionDTO(BaseModel):
+    name: str
+    raw_value: float
+    weight: float
+    contribution: float
+
+
+class ScoreResponse(BaseModel):
+    call_id: str
+    call_type: str
+    score: float
+    raw_score: float
+    bias: float
+    contributions: list[FeatureContributionDTO]
+    summary: str  # extractor's 3-line summary, surfaced for context
+
+
+class ScoreOverrideRequest(BaseModel):
+    call_id: str = Field(min_length=1)
+    user_score: float = Field(ge=0.0, le=100.0)
+    primary_win: str | None = Field(default=None)
+
+
+class ScoreOverrideResponse(BaseModel):
+    call_id: str
+    predicted_score: float
+    user_score: float
+    delta: float
+    corrections_count: int  # total corrections in the log AFTER this write
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # App factory
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -152,6 +196,54 @@ def create_app(*, vault_root: Path | None = None, registry: LiveCallRegistry | N
 
     _register_routes(app)
     return app
+
+
+def _compute_score_response(*, vault: Path, call_id: str, primary_win: str | None):
+    """Shared between GET /score and POST /score_override — loads the call,
+    runs feature extraction + the scorer, and returns a ScoreResponse DTO.
+
+    Raises HTTPException(404) when the call note doesn't exist. The
+    primary-win field is optional; when missing the feature stays at the
+    neutral 0.5 baseline.
+    """
+    try:
+        inputs = load_call_for_scoring(
+            vault_root=vault,
+            call_id=call_id,
+            primary_win=primary_win or None,
+        )
+    except CallNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    weights_path = vault.expanduser().resolve() / "00_System" / "scoring_weights.yaml"
+    weights_table = ScoringWeightsTable.load(weights_path)
+    weights = weights_table.for_call_type(inputs.call_type)
+
+    features = compute_features(
+        atoms=inputs.atoms,
+        turns=inputs.turns,
+        call_type=inputs.call_type,
+        primary_win=inputs.primary_win,
+    )
+    result = compute_score(features=features, weights=weights)
+
+    return ScoreResponse(
+        call_id=call_id,
+        call_type=inputs.call_type.value,
+        score=result.score,
+        raw_score=result.raw_score,
+        bias=result.bias,
+        contributions=[
+            FeatureContributionDTO(
+                name=c.name,
+                raw_value=c.raw_value,
+                weight=c.weight,
+                contribution=c.contribution,
+            )
+            for c in result.contributions
+        ],
+        summary=inputs.summary,
+    )
 
 
 def _run_moment_detection_safely(state, vault_root: Path) -> None:
@@ -246,6 +338,54 @@ def _register_routes(app: FastAPI) -> None:
 
         return TranscriptDeltaResponse(
             call_id=body.call_id, turn_count=len(state.turns), accepted=True
+        )
+
+    @app.get("/score", response_model=ScoreResponse)
+    def score(
+        request: Request,
+        call_id: str = Query(..., min_length=1),
+        primary_win: str | None = Query(default=None),
+    ) -> ScoreResponse:
+        """Compute the 0-100 post-call score for a finished call. Reads the
+        call note + linked atoms from the vault — does NOT touch the live
+        call registry. Phase 5 v1 uses the neutral primary-win judge.
+        """
+        vault: Path = request.app.state.vault_root
+        return _compute_score_response(vault=vault, call_id=call_id, primary_win=primary_win)
+
+    @app.post("/score_override", response_model=ScoreOverrideResponse)
+    def score_override(
+        body: ScoreOverrideRequest,
+        request: Request,
+    ) -> ScoreOverrideResponse:
+        """Record the user's corrected score for a call. Re-computes the
+        predicted score + features at write time so the correction log has
+        everything `retrain` needs (no later schema migration to merge
+        features that were computed in the past)."""
+        vault: Path = request.app.state.vault_root
+        predicted = _compute_score_response(
+            vault=vault,
+            call_id=body.call_id,
+            primary_win=body.primary_win,
+        )
+        feature_values = {c.name: c.raw_value for c in predicted.contributions}
+        correction = ScoreCorrection.make(
+            call_id=body.call_id,
+            call_type=predicted.call_type,
+            predicted_score=predicted.score,
+            user_score=body.user_score,
+            features=feature_values,
+            bias=predicted.bias,
+        )
+        append_correction(vault_root=vault, correction=correction)
+        from consultant_brain.scoring.corrections import load_corrections
+        total = len(load_corrections(vault))
+        return ScoreOverrideResponse(
+            call_id=body.call_id,
+            predicted_score=predicted.score,
+            user_score=body.user_score,
+            delta=body.user_score - predicted.score,
+            corrections_count=total,
         )
 
     @app.get("/suggestions", response_model=SuggestionsResponse)

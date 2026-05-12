@@ -186,6 +186,86 @@ def reindex(
 
 
 @app.command()
+def score(
+    call_id: str = typer.Argument(..., help="Call note ID, e.g. 2026-05-12_reece_consultingCall."),
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    primary_win: str = typer.Option(
+        "",
+        "--primary-win",
+        help="The client's primary_win statement. Drives the primary_win_progress feature when an LLM judge is wired (Phase 5 v1: judge is the neutral 0.5 stub).",
+    ),
+    explain: bool = typer.Option(
+        False,
+        "--explain",
+        help="Print per-feature contributions (raw × weight = contribution).",
+    ),
+    weights_path: Path = typer.Option(
+        None,
+        "--weights",
+        help="Override the weights YAML path. Defaults to <vault>/00_System/scoring_weights.yaml.",
+    ),
+) -> None:
+    """Compute the post-call 0-100 score for one call. Reads the call note +
+    its linked atoms from the vault; no Anthropic calls in v1 (the
+    primary-win judge uses the neutral 0.5 stub until the LLM judge is wired).
+    """
+    from consultant_brain.scoring.features import compute_features
+    from consultant_brain.scoring.loader import CallNotFoundError, load_call_for_scoring
+    from consultant_brain.scoring.score import compute_score
+    from consultant_brain.scoring.weights import ScoringWeightsTable
+
+    try:
+        inputs = load_call_for_scoring(
+            vault_root=vault,
+            call_id=call_id,
+            primary_win=primary_win or None,
+        )
+    except CallNotFoundError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    weights_table_path = weights_path or (vault.expanduser() / "00_System" / "scoring_weights.yaml")
+    weights_table = ScoringWeightsTable.load(weights_table_path)
+    weights = weights_table.for_call_type(inputs.call_type)
+
+    features = compute_features(
+        atoms=inputs.atoms,
+        turns=inputs.turns,
+        call_type=inputs.call_type,
+        primary_win=inputs.primary_win,
+    )
+    result = compute_score(features=features, weights=weights)
+
+    typer.echo(result.summary_line())
+    if explain:
+        typer.echo("")
+        typer.echo(f"  bias              {weights.bias:>6.1f}")
+        for c in result.contributions:
+            typer.echo(
+                f"  {c.name:<22} {c.raw_value:>5.2f} × {c.weight:>+6.1f} = {c.contribution:>+6.1f}"
+            )
+        typer.echo(f"  raw score         {result.raw_score:>+6.1f}")
+        typer.echo(f"  clamped           {result.score:>6.1f}")
+
+
+@app.command()
+def retrain(
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+) -> None:
+    """Re-fit the scoring weights from accumulated user corrections.
+
+    Reads vault/00_System/score_corrections.jsonl, runs a per-call-type
+    linear regression once total corrections ≥20 (and per-type corrections
+    ≥5), writes new weights to vault/00_System/scoring_weights.yaml with a
+    timestamped .bak of the prior file.
+    """
+    from consultant_brain.scoring.retrain import retrain_weights
+
+    report = retrain_weights(vault_root=vault)
+    typer.echo(report.summary_line())
+
+
+@app.command()
 def serve(
     host: str = typer.Option(
         "127.0.0.1",

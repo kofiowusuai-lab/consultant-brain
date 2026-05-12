@@ -82,6 +82,20 @@ uv run consultant-brain suggest \
 
 Returns the panel slice the live copilot would show: 1 hot + 2 warm + 1 cold atom by default. `--explain` prints rank components (similarity / recency / confidence / final score).
 
+### Post-call scoring + override (Phase 5)
+
+```bash
+# Score a finished call
+uv run consultant-brain score 2026-05-12_reece_consultingCall --vault ~/ConsultantBrain --explain
+
+# Once 20+ user overrides have accumulated, refit the weights
+uv run consultant-brain retrain --vault ~/ConsultantBrain
+```
+
+Scoring is a weighted sum of 9 observable features (next-step booked, objections resolved, talk-ratio balance, commitments made, win/loss/confusion signal counts, completion of agenda, LLM-judged primary-win progress). Default weights live in `~/ConsultantBrain/00_System/scoring_weights.yaml` with per-call-type profiles — closing calls weight commitments heavily, cold calls weight next-step heaviest, training calls treat confusion as positive (questions are good when learning).
+
+User overrides hit `POST /score_override`, append to `00_System/score_corrections.jsonl`, and feed the `retrain` linear-regression job once you have ≥20 corrections (≥5 per call type).
+
 ### FastAPI service (Phase 3)
 
 The Swift app + Phase 4's live loop talk to the brain over HTTP.
@@ -108,6 +122,8 @@ Endpoints:
 - `POST /transcript_delta` — `{ call_id, speaker: "you"|"them", text }`
 - `GET /suggestions?call_id=X[&hot=1&warm=2&cold=1]` — panel slice
 - `POST /call_end` — `{ call_id }`
+- `GET /score?call_id=X[&primary_win=...]` — 0–100 score + per-feature breakdown
+- `POST /score_override` — `{ call_id, user_score, primary_win? }`
 
 Port 8787 by default (not 8765 — that's OpenClaw's shared swap port). `--reload` for dev auto-reload.
 
@@ -121,4 +137,4 @@ uv run pytest
 
 ## Out of scope this phase
 
-Swift app integration · live 15s loop · auto-scoring · pattern distillation · context.md auto-regen · stakeholder graph · weekly reviews · CRM linking. Each gets its own plan when we ship it.
+Swift app score-override UI · pattern distillation · context.md auto-regen · stakeholder graph · weekly reviews · CRM linking. Each gets its own plan when we ship it.
