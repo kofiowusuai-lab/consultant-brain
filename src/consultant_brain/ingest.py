@@ -176,6 +176,23 @@ def run_ingest(
     atom_paths = [write_atom(layout, atom) for atom in atoms]
     call_note_path = write_call_note(layout, call_note)
 
+    # Embed every atom into LanceDB. Lazy import so unit tests that mock the
+    # whole pipeline don't have to spin up Ollama just to verify file writes.
+    # On failure (Ollama down, model not pulled) we log + continue — markdown
+    # has already been written; re-running ingest will pick up the embedding.
+    try:
+        from consultant_brain.embedder import LanceVaultIndex
+
+        index = LanceVaultIndex(layout)
+        index.upsert_many(atoms)
+    except Exception as exc:  # noqa: BLE001 — surface to operator without losing the write
+        typer.secho(
+            f"[warning] Embedding skipped: {exc}. Markdown is on disk; "
+            "re-run ingest after `ollama serve && ollama pull nomic-embed-text`.",
+            err=True,
+            fg=typer.colors.YELLOW,
+        )
+
     return IngestResult(
         call_note_path=call_note_path,
         atom_paths=atom_paths,
