@@ -12,11 +12,25 @@ from consultant_brain.cli import app
 runner = CliRunner()
 
 
-def test_help_lists_both_subcommands() -> None:
+def test_help_lists_all_subcommands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0, result.output
-    assert "ingest" in result.output
-    assert "query" in result.output
+    for name in ("ingest", "query", "suggest", "reindex"):
+        assert name in result.output, f"missing subcommand: {name}"
+
+
+def test_suggest_help_shows_required_flags() -> None:
+    result = runner.invoke(app, ["suggest", "--help"])
+    assert result.exit_code == 0, result.output
+    for flag in ("--window", "--client", "--call-type", "--vault", "--explain", "--hot", "--warm", "--cold"):
+        assert flag in result.output, f"missing flag: {flag}"
+
+
+def test_reindex_help_shows_force_flag() -> None:
+    result = runner.invoke(app, ["reindex", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--force" in result.output
+    assert "--vault" in result.output
 
 
 def test_ingest_help_shows_required_flags() -> None:

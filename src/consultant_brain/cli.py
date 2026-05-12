@@ -103,5 +103,87 @@ def query(
         typer.echo(hit.format_line())
 
 
+@app.command()
+def suggest(
+    window: str = typer.Option(
+        ...,
+        "--window",
+        "-w",
+        help="Live transcript window (last 60-90s of conversation). The model retrieves atoms semantically relevant to this.",
+    ),
+    client: str = typer.Option(
+        None,
+        "--client",
+        "-c",
+        help="Client display name (enables the hot layer; omit for cross-client warm-only retrieval).",
+    ),
+    call_type: str = typer.Option(
+        "consultingCall",
+        "--call-type",
+        "-t",
+        help="One of: consultingCall | aiTraining | coldCall | closingCall | followUp | implementation",
+    ),
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    explain: bool = typer.Option(
+        False,
+        "--explain",
+        help="Print rank components (similarity / recency / confidence / final score) per atom.",
+    ),
+    hot_n: int = typer.Option(1, "--hot", help="Max atoms from the hot layer."),
+    warm_n: int = typer.Option(2, "--warm", help="Max atoms from the warm layer."),
+    cold_n: int = typer.Option(1, "--cold", help="Max atoms from the cold layer."),
+) -> None:
+    """Run three-layer retrieval against a transcript window and print the
+    ranked suggestions the live copilot would surface.
+    """
+    from consultant_brain.schemas import CallType
+    from consultant_brain.retrieve import retrieve
+
+    try:
+        call_type_enum = CallType(call_type)
+    except ValueError as exc:
+        valid = ", ".join(t.value for t in CallType)
+        raise typer.BadParameter(f"Unknown call type: {call_type!r}. Valid: {valid}") from exc
+
+    result = retrieve(
+        transcript_window=window,
+        client=client,
+        call_type=call_type_enum,
+        vault_root=vault,
+    )
+    panel = result.top_for_panel(hot=hot_n, warm=warm_n, cold=cold_n)
+    if not panel:
+        typer.echo("No suggestions — vault empty or transcript window unmatched.")
+        raise typer.Exit(code=1)
+
+    for rh in panel:
+        line = f"{rh.layer.upper():4}  {rh.hit.format_line()}"
+        typer.echo(line)
+        if explain:
+            typer.echo(
+                f"      ↳ sim={rh.similarity:.2f}  rec={rh.recency:.2f}  "
+                f"conf={rh.confidence:.2f}  score={rh.score:.3f}  · {rh.reason}"
+            )
+
+
+@app.command()
+def reindex(
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-embed every atom in the vault, even ones already in the index.",
+    ),
+) -> None:
+    """Re-embed atoms missing from LanceDB. Safe recovery from index wipes,
+    Obsidian-side manual atom adds, or model swaps. Does NOT re-run Claude
+    extraction — just rebuilds the vector index from the existing markdown.
+    """
+    from consultant_brain.reindex import run_reindex
+
+    summary = run_reindex(vault_root=vault, force=force)
+    typer.echo(summary.summary_line())
+
+
 if __name__ == "__main__":
     app()
