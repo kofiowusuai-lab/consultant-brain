@@ -24,6 +24,7 @@ from pathlib import Path
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from consultant_brain.live_call_finalizer import finalize_live_call
 from consultant_brain.live_loop import maybe_run_moment_detection
 from consultant_brain.live_state import LiveCallRegistry
 from consultant_brain.retrieve import RankedHit, retrieve
@@ -66,6 +67,11 @@ class CallEndRequest(BaseModel):
 class CallEndResponse(BaseModel):
     call_id: str
     ended: bool  # False if the call_id wasn't active (caller might have already ended it)
+    # Phase 5.2: when the call was active + had any state, /call_end now
+    # writes a CallNote markdown file so the post-call /score endpoint
+    # can read it immediately. The Swift override sheet uses this ID.
+    call_note_id: str | None = None
+    atom_count: int = 0
 
 
 class TranscriptDeltaRequest(BaseModel):
@@ -307,10 +313,32 @@ def _register_routes(app: FastAPI) -> None:
     @app.post("/call_end", response_model=CallEndResponse)
     def call_end(
         body: CallEndRequest,
+        request: Request,
         registry: LiveCallRegistry = Depends(get_registry),
     ) -> CallEndResponse:
         popped = registry.end(body.call_id)
-        return CallEndResponse(call_id=body.call_id, ended=popped is not None)
+        if popped is None:
+            return CallEndResponse(call_id=body.call_id, ended=False)
+
+        # Finalize: write a CallNote on disk so /score can read it without
+        # waiting for the post-call Claude ingestion. Live-detected atoms
+        # were already linked to this call_note_id by the Phase 4 loop.
+        try:
+            result = finalize_live_call(
+                state=popped,
+                vault_root=request.app.state.vault_root,
+            )
+        except Exception as exc:  # noqa: BLE001 — never let finalize crash /call_end
+            import logging
+            logging.getLogger(__name__).exception("finalize_live_call failed: %s", exc)
+            return CallEndResponse(call_id=body.call_id, ended=True)
+
+        return CallEndResponse(
+            call_id=body.call_id,
+            ended=True,
+            call_note_id=result.call_note_id,
+            atom_count=result.atom_count,
+        )
 
     @app.post("/transcript_delta", response_model=TranscriptDeltaResponse)
     def transcript_delta(

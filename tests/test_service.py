@@ -83,7 +83,14 @@ def test_call_end_frees_state(app_client: TestClient) -> None:
     app_client.post("/call_start", json={"call_id": "call_abc", "client": "Reece", "call_type": "consultingCall"})
     response = app_client.post("/call_end", json={"call_id": "call_abc"})
     assert response.status_code == 200, response.text
-    assert response.json() == {"call_id": "call_abc", "ended": True}
+    body = response.json()
+    assert body["call_id"] == "call_abc"
+    assert body["ended"] is True
+    # Phase 5.2: /call_end now writes a CallNote on disk so the score
+    # endpoint can read it back immediately. The note ID is surfaced
+    # for the Swift override sheet.
+    assert body["call_note_id"] is not None
+    assert body["call_note_id"].endswith("_consultingCall")
     assert app_client.get("/healthz").json()["active_calls"] == 0
 
 
