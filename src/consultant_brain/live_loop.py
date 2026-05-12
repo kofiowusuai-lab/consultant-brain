@@ -108,9 +108,32 @@ def maybe_run_moment_detection(
         window_lines.append(f"{label}: {turn.text.strip()}")
     window = "\n\n".join(window_lines)
 
-    # ---- get an Anthropic client ----
+    # ---- pick the LLM ----
+    # Phase 8 wiring + Phase ~ knob: read `BRAIN_MOMENT_PROVIDER` so the
+    # Swift Brain Settings picker can flip the moment detector to a
+    # cheaper/faster model (DeepSeek, Kimi, Haiku via OpenRouter) without
+    # touching the extractor. Falls back gracefully to the legacy
+    # AnthropicClient path when the env is unset OR when building the
+    # chosen provider fails (e.g. its key is missing). That fallback is
+    # important: a missing DeepSeek key should NOT kill live moment
+    # detection — Anthropic still runs.
+    from consultant_brain.llm.provider import LLMProvider, ProviderError
+    from consultant_brain.llm.registry import build_provider, resolve_provider_name
+
+    provider: LLMProvider | None = None
+    provider_name = resolve_provider_name(env_var="BRAIN_MOMENT_PROVIDER")
+    if provider_name != "anthropic":
+        try:
+            provider = build_provider(env_var="BRAIN_MOMENT_PROVIDER")
+        except ProviderError as exc:
+            logger.warning(
+                "moment detection: %s provider unavailable (%s) — falling back to Anthropic",
+                provider_name, exc,
+            )
+            provider = None
+
     client = anthropic_client
-    if client is None:
+    if provider is None and client is None:
         try:
             key = get_anthropic_key()
         except SecretNotFoundError as exc:
@@ -123,7 +146,8 @@ def maybe_run_moment_detection(
         window=window,
         call_type=state.call_type,
         client_name=state.client,
-        client=client,
+        provider=provider,
+        client=client if provider is None else None,
     )
 
     # Update throttle even when we got zero atoms — a quiet pass still
