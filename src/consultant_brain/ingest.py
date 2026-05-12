@@ -22,6 +22,8 @@ from consultant_brain.extractor import (
     extract,
     real_anthropic_client,
 )
+from consultant_brain.llm.provider import LLMProvider, ProviderError
+from consultant_brain.llm.registry import build_provider, default_model_for
 from consultant_brain.schemas import (
     Atom,
     AtomStatus,
@@ -76,6 +78,9 @@ def run_ingest(
     redact: bool,
     dry_run: bool,
     client: AnthropicClient | None = None,
+    provider: LLMProvider | None = None,
+    extractor_provider_name: str | None = None,
+    extractor_model: str | None = None,
     crm_resolver: CRMResolver | None = None,
 ) -> IngestResult:
     """Ingest one session JSON into the vault.
@@ -114,14 +119,41 @@ def run_ingest(
     loaded = load_session(session_path)
     transcript_for_extraction = _maybe_redact(loaded.transcript, client_name) if redact else loaded.transcript
 
-    anthropic_client = client or real_anthropic_client(get_anthropic_key())
-    extractor_result = extract(
-        transcript=transcript_for_extraction,
-        call_type=call_type_enum,
-        client_name=None if redact else client_name,
-        client=anthropic_client,
-        model=config.extractor_model,
-    )
+    # Phase 8 wiring: prefer the provider path, fall back to the legacy
+    # AnthropicClient one. Resolution order for `provider`:
+    #   1. caller passed one explicitly
+    #   2. caller passed --extractor-provider name
+    #   3. BRAIN_LLM_PROVIDER env var
+    #   4. anthropic default
+    active_provider: LLMProvider | None = provider
+    if active_provider is None and (extractor_provider_name or "anthropic") != "anthropic":
+        try:
+            active_provider = build_provider(extractor_provider_name)
+        except ProviderError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+    model = extractor_model or config.extractor_model
+    if active_provider is not None and extractor_model is None and extractor_provider_name:
+        # Use the provider's sensible default model unless caller pinned one.
+        model = default_model_for(extractor_provider_name) or config.extractor_model
+
+    if active_provider is not None:
+        extractor_result = extract(
+            transcript=transcript_for_extraction,
+            call_type=call_type_enum,
+            client_name=None if redact else client_name,
+            provider=active_provider,
+            model=model,
+        )
+    else:
+        anthropic_client = client or real_anthropic_client(get_anthropic_key())
+        extractor_result = extract(
+            transcript=transcript_for_extraction,
+            call_type=call_type_enum,
+            client_name=None if redact else client_name,
+            client=anthropic_client,
+            model=model,
+        )
 
     layout = VaultLayout.for_root(vault_root)
     call_id = derive_call_id(

@@ -218,22 +218,42 @@ def _dedupe_by_tag(ranked: list[RankedHit], *, per_bucket: int) -> list[RankedHi
 
 
 def _cold_layer(*, vault_root: Path, transcript_window: str, today: date) -> list[RankedHit]:
-    """Pattern matching against `04_Patterns/` populated by the Phase 6
-    distiller. Patterns whose primary_tag or example phrases echo in the
-    transcript window fire. Falls back to an empty list when (a) no
-    patterns exist yet, (b) the window is empty.
+    """Pattern + play matching for the cold layer.
+
+    Patterns (`04_Patterns/`) fire when their primary_tag or example
+    phrases echo in the window. Plays (`05_Plays/`) fire when the
+    transcript echoes any of the promoted play's seed body words.
+    Plays rank above patterns because they require more evidence
+    (≥3 distinct clients vs ≥3 distinct calls) and so represent a more
+    proven move.
     """
     if not transcript_window.strip():
         return []
     # Lazy import — keeps retrieve.py importable without distillation deps.
     from consultant_brain.distillation.cold_layer import (
         find_matching_patterns,
+        find_matching_plays,
         pattern_hit_as_atom_hit,
+        play_hit_as_atom_hit,
     )
 
-    hits = find_matching_patterns(vault_root=vault_root, window=transcript_window, top_n=COLD_LAYER_MAX)
     out: list[RankedHit] = []
-    for hit in hits:
+
+    # Plays first — higher-leverage by construction.
+    play_hits = find_matching_plays(vault_root=vault_root, window=transcript_window, top_n=COLD_LAYER_MAX)
+    for hit in play_hits:
+        atom_hit = play_hit_as_atom_hit(hit)
+        out.append(
+            _rank_hit(
+                atom_hit,
+                layer="cold",
+                today=today,
+                reason=f"play fire: {hit.matched_phrase}",
+            )
+        )
+
+    pattern_hits = find_matching_patterns(vault_root=vault_root, window=transcript_window, top_n=COLD_LAYER_MAX)
+    for hit in pattern_hits:
         atom_hit = pattern_hit_as_atom_hit(hit)
         out.append(
             _rank_hit(
@@ -243,7 +263,7 @@ def _cold_layer(*, vault_root: Path, transcript_window: str, today: date) -> lis
                 reason=f"pattern fire: {hit.matched_phrase}",
             )
         )
-    return out
+    return out[:COLD_LAYER_MAX]
 
 
 # ────────────────────────────────────────────────────────────────────────────

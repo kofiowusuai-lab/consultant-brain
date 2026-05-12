@@ -285,26 +285,70 @@ def distill(
     skip_context: bool = typer.Option(
         False,
         "--skip-context",
-        help="Skip the context.md regeneration pass (run pattern mining only).",
+        help="Skip the context.md regeneration pass.",
     ),
     skip_patterns: bool = typer.Option(
         False,
         "--skip-patterns",
-        help="Skip the pattern miner (regenerate context.md only).",
+        help="Skip the pattern miner.",
+    ),
+    skip_plays: bool = typer.Option(
+        False,
+        "--skip-plays",
+        help="Skip the plays auto-promoter.",
+    ),
+    skip_people: bool = typer.Option(
+        False,
+        "--skip-people",
+        help="Skip the stakeholder graph build.",
+    ),
+    skip_tags: bool = typer.Option(
+        False,
+        "--skip-tags",
+        help="Skip tag normalization.",
+    ),
+    skip_retirement: bool = typer.Option(
+        False,
+        "--skip-retirement",
+        help="Skip atom lifecycle transitions.",
     ),
 ) -> None:
-    """Phase 6 distillation: mine patterns + regenerate context.md.
+    """Phase 6+8 distillation pipeline.
 
-    Pattern mining: walks 03_Atoms/, finds (type, primary_tag) clusters
-    observed ≥3× across distinct calls, promotes each to a Pattern note
-    in 04_Patterns/.
-
-    Context regeneration: for every client folder under 01_Clients/,
-    rebuilds context.md from active atoms + recent call notes. Pinned
-    user notes inside `<!-- pin -->` blocks are preserved.
+    Runs every active distiller unless skipped:
+      tags         — fold near-duplicate tags onto canonical forms
+      retirement   — flip stale atoms active → needs_review → retired
+      patterns     — promote recurring (type, tag) clusters → 04_Patterns/
+      plays        — promote cross-client recurring bodies → 05_Plays/
+      people       — regenerate 07_People/ stakeholder files from the CRM
+      context      — rebuild every client's context.md with pinned-note
+                     preservation
     """
     from consultant_brain.distillation.client_context import regenerate_all_clients
     from consultant_brain.distillation.patterns import mine_patterns
+    from consultant_brain.distillation.plays import mine_plays
+    from consultant_brain.distillation.people import regenerate_people
+    from consultant_brain.distillation.retirement import run_retirement
+    from consultant_brain.distillation.tags import normalize_tags
+
+    if not skip_tags:
+        tag_result = normalize_tags(vault_root=vault)
+        if tag_result.atoms_rewritten:
+            typer.echo(
+                f"Tags: rewrote {tag_result.atoms_rewritten} of "
+                f"{tag_result.atoms_scanned} atoms · "
+                f"{len(tag_result.tag_replacements)} unique replacements."
+            )
+        else:
+            typer.echo(f"Tags: {tag_result.atoms_scanned} scanned, none needed rewriting.")
+
+    if not skip_retirement:
+        ret_result = run_retirement(vault_root=vault)
+        typer.echo(
+            f"Retirement: scanned {ret_result.atoms_scanned} · "
+            f"flagged {ret_result.flagged_needs_review} · "
+            f"retired {ret_result.retired} · revived {ret_result.revived}."
+        )
 
     if not skip_patterns:
         pattern_result = mine_patterns(vault_root=vault)
@@ -313,10 +357,26 @@ def distill(
             f"updated {pattern_result.patterns_updated}, "
             f"skipped {pattern_result.candidates_skipped} below threshold."
         )
-        # Phase 7: every mine pass snapshots the pattern state so the
-        # stability metric has a time-series to compute against.
         from consultant_brain.evaluation.pattern_stability import take_snapshot
         take_snapshot(vault_root=vault)
+
+    if not skip_plays:
+        play_result = mine_plays(vault_root=vault)
+        typer.echo(
+            f"Plays: wrote {play_result.plays_written}, "
+            f"updated {play_result.plays_updated}, "
+            f"skipped {play_result.plays_skipped} below threshold."
+        )
+
+    if not skip_people:
+        people_result = regenerate_people(vault_root=vault)
+        typer.echo(
+            f"People: wrote {people_result.people_written}, "
+            f"updated {people_result.people_updated} · "
+            f"dir={people_result.people_dir}"
+        )
+        for note in people_result.notes:
+            typer.echo(f"  · {note}")
 
     if not skip_context:
         context_results = regenerate_all_clients(vault_root=vault)
@@ -329,6 +389,111 @@ def distill(
                 )
         else:
             typer.echo("Context: no clients to regenerate.")
+
+
+@app.command()
+def weekly(
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    week: str | None = typer.Option(
+        None,
+        "--week",
+        "-w",
+        help="ISO week id like 2026-W19. Defaults to the current ISO week.",
+    ),
+) -> None:
+    """Generate a weekly review at 08_Reviews/<YYYY-Www>.md."""
+    from consultant_brain.distillation.reviews import generate_weekly_review
+
+    result = generate_weekly_review(vault_root=vault, week_iso=week)
+    typer.echo(
+        f"Weekly review {result.week_id}: {result.atom_count} atoms · "
+        f"{result.call_count} calls · {result.client_count} clients · "
+        f"{result.path}"
+    )
+
+
+@app.command()
+def backup(
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        "-o",
+        help="Output tarball path. Defaults to ~/Documents/ConsultantBrain-backups/<timestamp>.tar.gz",
+    ),
+) -> None:
+    """Snapshot the vault + LanceDB index to a tarball.
+
+    Output format is .tar.gz (universal) — the index is small enough
+    that zstd isn't worth the dependency. Restore with `consultant-brain
+    restore --from <tarball> --vault <target>`.
+    """
+    from consultant_brain.backup import create_backup
+
+    result = create_backup(vault_root=vault, out_path=out)
+    typer.echo(
+        f"Backup → {result.archive_path} · {result.archive_size_bytes} bytes · "
+        f"{result.file_count} files"
+    )
+
+
+@app.command()
+def restore(
+    archive: Path = typer.Option(
+        ...,
+        "--from",
+        "-f",
+        help="Path to a tarball produced by `consultant-brain backup`.",
+        exists=True,
+        readable=True,
+    ),
+    vault: Path = typer.Option(
+        ...,
+        "--vault",
+        "-v",
+        help="Target vault directory. Must be empty or non-existent.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite an existing non-empty vault directory.",
+    ),
+) -> None:
+    """Restore a vault from a backup tarball."""
+    from consultant_brain.backup import restore_backup
+
+    result = restore_backup(archive_path=archive, vault_root=vault, force=force)
+    typer.echo(
+        f"Restored {result.file_count} files · {result.bytes_written} bytes · "
+        f"vault={result.vault_root}"
+    )
+
+
+@app.command()
+def export(
+    out: Path = typer.Option(..., "--out", "-o", help="Output directory."),
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    anonymize: bool = typer.Option(
+        True,
+        "--anonymize/--no-anonymize",
+        help="Strip client + person names + emails. Default ON.",
+    ),
+) -> None:
+    """Export the vault to a shareable directory.
+
+    With --anonymize (default), every client display name becomes
+    [CLIENT_N], every stakeholder becomes [PERSON_N], every email is
+    redacted. Patterns + plays preserve their structure intact so a team
+    can share playbooks without leaking client identity.
+    """
+    from consultant_brain.export import export_vault
+
+    result = export_vault(vault_root=vault, out_dir=out, anonymize=anonymize)
+    typer.echo(
+        f"Exported {result.atom_count} atoms · {result.call_count} call notes · "
+        f"{result.pattern_count} patterns · {result.play_count} plays · "
+        f"{result.replacements_applied} identifiers redacted · → {result.out_dir}"
+    )
 
 
 @app.command()

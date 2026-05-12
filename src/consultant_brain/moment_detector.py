@@ -27,6 +27,11 @@ from consultant_brain.extractor import (
     AnthropicClient,
     ExtractorError,
 )
+from consultant_brain.llm.provider import (
+    ChatRequest,
+    LLMProvider,
+    ProviderError,
+)
 from consultant_brain.schemas import (
     DEFAULT_EXTRACTOR_MODEL,
     AtomType,
@@ -107,7 +112,8 @@ def detect_moments(
     window: str,
     call_type: CallType,
     client_name: str | None,
-    client: AnthropicClient,
+    client: AnthropicClient | None = None,
+    provider: LLMProvider | None = None,
     model: str = DEFAULT_EXTRACTOR_MODEL,
     max_tokens: int = 1024,
     confidence_floor: float = 0.7,
@@ -117,22 +123,48 @@ def detect_moments(
     Errors return `[]` rather than raising — the live loop should never
     take down the FastAPI service. Logged failures are visible in the
     service's stderr.
+
+    Either `provider` (new path) or `client` (legacy / test path) must
+    be supplied. Passing both = provider wins.
     """
     if not window.strip():
         return []
+    if provider is None and client is None:
+        return []  # never crash the live loop
 
-    user_prompt = build_user_prompt(window=window, call_type=call_type, client_name=client_name)
-    try:
-        response = client.messages_create(
-            model=model,
-            system=MOMENT_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
-            max_tokens=max_tokens,
-        )
-    except Exception:
-        return []
+    user_prompt = build_user_prompt(
+        window=window, call_type=call_type, client_name=client_name
+    )
 
-    raw = _concat_text(response)
+    raw: str = ""
+    if provider is not None:
+        try:
+            resp = provider.chat(
+                ChatRequest(
+                    system=MOMENT_SYSTEM_PROMPT,
+                    user=user_prompt,
+                    model=model,
+                    max_tokens=max_tokens,
+                    enable_prompt_cache=True,
+                )
+            )
+            raw = resp.text
+        except ProviderError:
+            return []
+        except Exception:
+            return []
+    else:
+        try:
+            response = client.messages_create(  # type: ignore[union-attr]
+                model=model,
+                system=MOMENT_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_prompt}],
+                max_tokens=max_tokens,
+            )
+        except Exception:
+            return []
+        raw = _concat_text(response)
+
     if not raw:
         return []
 
@@ -144,7 +176,7 @@ def detect_moments(
             atom = ExtractedAtom.model_validate(entry)
             if atom.confidence >= confidence_floor:
                 atoms.append(atom)
-        return atoms[:3]  # cap at 3 even if the model returns more
+        return atoms[:3]
     except Exception:
         return []
 

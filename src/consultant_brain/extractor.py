@@ -24,6 +24,11 @@ from typing import Any, Protocol
 
 from anthropic import Anthropic
 
+from consultant_brain.llm.provider import (
+    ChatRequest,
+    LLMProvider,
+    ProviderError,
+)
 from consultant_brain.schemas import (
     DEFAULT_EXTRACTOR_MODEL,
     AtomType,
@@ -188,22 +193,51 @@ def extract(
     transcript: str,
     call_type: CallType,
     client_name: str | None,
-    client: AnthropicClient,
+    client: AnthropicClient | None = None,
+    provider: LLMProvider | None = None,
     model: str = DEFAULT_EXTRACTOR_MODEL,
     max_tokens: int = 8192,
 ) -> ExtractorResult:
-    """Send the transcript to Claude, parse the response, validate against
+    """Send the transcript to an LLM, parse the response, validate against
     `ExtractorResult`. Raises on any deviation — never returns partial data.
+
+    Either `provider` (new path) or `client` (legacy / test path) must be
+    supplied. When both are passed, `provider` wins — call sites in
+    transition can keep `client` while we migrate them.
     """
-    user_prompt = build_user_prompt(transcript=transcript, call_type=call_type, client_name=client_name)
-    response = client.messages_create(
-        model=model,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-        max_tokens=max_tokens,
+    if provider is None and client is None:
+        raise ExtractorError("extract() requires either `provider` or `client`")
+
+    user_prompt = build_user_prompt(
+        transcript=transcript,
+        call_type=call_type,
+        client_name=client_name,
     )
 
-    raw_text = _concat_text(response)
+    if provider is not None:
+        try:
+            response = provider.chat(
+                ChatRequest(
+                    system=SYSTEM_PROMPT,
+                    user=user_prompt,
+                    model=model,
+                    max_tokens=max_tokens,
+                    enable_prompt_cache=True,
+                )
+            )
+        except ProviderError as exc:
+            raise ExtractorError(str(exc)) from exc
+        raw_text = response.text
+    else:
+        assert client is not None  # narrowed by the guard above
+        resp = client.messages_create(
+            model=model,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+            max_tokens=max_tokens,
+        )
+        raw_text = _concat_text(resp)
+
     payload = _parse_json_strict(raw_text)
     return ExtractorResult.model_validate(payload)
 

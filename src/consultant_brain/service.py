@@ -24,9 +24,12 @@ from pathlib import Path
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from consultant_brain.crm.resolver import CRMResolver
 from consultant_brain.live_call_finalizer import finalize_live_call
 from consultant_brain.live_loop import maybe_run_moment_detection
 from consultant_brain.live_state import LiveCallRegistry
+from consultant_brain.llm.provider import LLMProvider, ProviderError
+from consultant_brain.llm.registry import build_provider
 from consultant_brain.retrieve import RankedHit, retrieve
 from consultant_brain.schemas import CallType, Speaker
 from consultant_brain.scoring.corrections import (
@@ -55,6 +58,11 @@ class CallStartRequest(BaseModel):
     call_id: str = Field(min_length=1)
     client: str | None = Field(default=None)
     call_type: CallType = Field(default=CallType.consulting_call)
+    # Phase 8 item 1: Swift sends the CRM organization UUID so atoms
+    # written during this call carry a stable client identifier even if
+    # the display name is later renamed. Optional — falls back to
+    # name-based resolution when missing.
+    org_id: str | None = Field(default=None)
 
 
 class CallStartResponse(BaseModel):
@@ -62,6 +70,7 @@ class CallStartResponse(BaseModel):
     client: str | None
     call_type: CallType
     started_at: datetime
+    org_id: str | None = None
 
 
 class CallEndRequest(BaseModel):
@@ -218,8 +227,34 @@ def create_app(*, vault_root: Path | None = None, registry: LiveCallRegistry | N
         "CONSULTANT_BRAIN_MOMENT_DETECTION", ""
     ).lower() in ("1", "true", "yes", "on")
 
+    # Phase 8 item 1 + 5: shared CRM resolver + post-call extractor provider.
+    # Both are lazy — built on first use, cached on app.state so tests can
+    # inject doubles via create_app's kwargs in the future.
+    app.state.crm_resolver = CRMResolver()
+    app.state.crm_org_id_for_call = {}
+    app.state.post_call_extraction_enabled = os.environ.get(
+        "CONSULTANT_BRAIN_POST_CALL_EXTRACT", ""
+    ).lower() in ("1", "true", "yes", "on")
+    app.state.extractor_provider_cache = None
+
     _register_routes(app)
     return app
+
+
+def _get_extractor_provider(app) -> LLMProvider | None:
+    """Lazy-build the extractor provider — cached on the app once it
+    succeeds. Returns None if construction fails (missing API key) so
+    /call_end degrades to the placeholder summary instead of crashing.
+    """
+    cached = app.state.extractor_provider_cache
+    if cached is not None:
+        return cached
+    try:
+        provider = build_provider()
+    except ProviderError:
+        return None
+    app.state.extractor_provider_cache = provider
+    return provider
 
 
 def _compute_score_response(*, vault: Path, call_id: str, primary_win: str | None):
@@ -318,14 +353,36 @@ def _register_routes(app: FastAPI) -> None:
     @app.post("/call_start", response_model=CallStartResponse)
     def call_start(
         body: CallStartRequest,
+        request: Request,
         registry: LiveCallRegistry = Depends(get_registry),
     ) -> CallStartResponse:
         state = registry.start(call_id=body.call_id, client=body.client, call_type=body.call_type)
+
+        # Resolve the client → org UUID. Swift either sends it explicitly
+        # (the fast path — already in the CRM) or we resolve it here from
+        # the display name via CRMResolver. Cache the result on app.state
+        # so /call_end can stamp newly-extracted atoms with it.
+        from uuid import UUID
+        org_uuid: UUID | None = None
+        if body.org_id:
+            try:
+                org_uuid = UUID(body.org_id)
+            except ValueError:
+                org_uuid = None
+        if org_uuid is None and body.client:
+            try:
+                org_uuid = request.app.state.crm_resolver.resolve_uuid(body.client)
+            except Exception:
+                org_uuid = None
+        if org_uuid is not None:
+            request.app.state.crm_org_id_for_call[body.call_id] = org_uuid
+
         return CallStartResponse(
             call_id=state.call_id,
             client=state.client,
             call_type=state.call_type,
             started_at=state.started_at,
+            org_id=str(org_uuid) if org_uuid else None,
         )
 
     @app.post("/call_end", response_model=CallEndResponse)
@@ -341,10 +398,18 @@ def _register_routes(app: FastAPI) -> None:
         # Finalize: write a CallNote on disk so /score can read it without
         # waiting for the post-call Claude ingestion. Live-detected atoms
         # were already linked to this call_note_id by the Phase 4 loop.
+        # Phase 8 item 5: when post-call extraction is enabled and we can
+        # build an LLM provider, run the full extractor for a real summary.
+        provider: LLMProvider | None = None
+        if request.app.state.post_call_extraction_enabled:
+            provider = _get_extractor_provider(request.app)
+        org_uuid = request.app.state.crm_org_id_for_call.pop(body.call_id, None)
         try:
             result = finalize_live_call(
                 state=popped,
                 vault_root=request.app.state.vault_root,
+                provider=provider,
+                client_org_id=org_uuid,
             )
         except Exception as exc:  # noqa: BLE001 — never let finalize crash /call_end
             import logging
@@ -506,3 +571,115 @@ def _register_routes(app: FastAPI) -> None:
         except Exception:
             return SuggestionReferencedResponse(call_id=body.call_id, atom_id=body.atom_id, logged=False)
         return SuggestionReferencedResponse(call_id=body.call_id, atom_id=body.atom_id, logged=True)
+
+    # ──────────────────────────────────────────────────────────────────
+    # Phase 8 item 12 + 14 — metrics + diagnostics
+    # ──────────────────────────────────────────────────────────────────
+
+    @app.get("/metrics")
+    def metrics_endpoint(request: Request) -> dict:
+        """Return the Phase 7 dashboard as JSON.
+
+        Wraps `compute_metrics()` so the Swift Brain Status window can
+        render the same numbers the CLI prints. Missing data points stay
+        None — the dashboard renders them as `—`.
+        """
+        from consultant_brain.evaluation.metrics import compute_metrics
+
+        vault: Path = request.app.state.vault_root
+        report = compute_metrics(vault_root=vault)
+        return report.to_dict()
+
+    @app.get("/diagnostics")
+    def diagnostics_endpoint(request: Request) -> dict:
+        """Deep readiness check — checks every dependency the brain
+        relies on. Returns a structured response the Swift health
+        indicator parses to pick green/yellow/red.
+
+        - vault_root exists + is writable
+        - LanceDB index path exists (or can be created)
+        - Ollama is reachable on localhost (warning, not error)
+        - LLM provider's API key is present
+        """
+        import os
+
+        from consultant_brain.embedder import LanceVaultIndex
+        from consultant_brain.secrets import has_key
+
+        vault: Path = request.app.state.vault_root
+        checks: dict[str, dict] = {}
+
+        # Vault path
+        checks["vault"] = {
+            "ok": vault.exists() and vault.is_dir() and os.access(vault, os.W_OK),
+            "path": str(vault),
+        }
+
+        # LanceDB index
+        try:
+            from consultant_brain.vault import VaultLayout
+            layout = VaultLayout.for_root(vault)
+            LanceVaultIndex(layout)  # builds dir if missing
+            checks["lancedb"] = {"ok": True}
+        except Exception as exc:
+            checks["lancedb"] = {"ok": False, "error": str(exc)[:200]}
+
+        # Ollama
+        ollama_ok = _ping_ollama()
+        checks["ollama"] = ollama_ok
+
+        # LLM provider key
+        provider_name = (
+            os.environ.get("BRAIN_LLM_PROVIDER", "").strip().lower() or "anthropic"
+        )
+        key_account = {
+            "anthropic": ("ANTHROPIC_API_KEY", "anthropic-api-key"),
+            "openai": ("OPENAI_API_KEY", "openai-api-key"),
+            "openrouter": ("OPENROUTER_API_KEY", "openrouter-api-key"),
+            "deepseek": ("DEEPSEEK_API_KEY", "deepseek-api-key"),
+            "kimi": ("KIMI_API_KEY", "kimi-api-key"),
+        }
+        env_var, secrets_acct = key_account.get(
+            provider_name, ("ANTHROPIC_API_KEY", "anthropic-api-key")
+        )
+        checks["llm_provider"] = {
+            "name": provider_name,
+            "key_present": has_key(env_var=env_var, secrets_account=secrets_acct),
+        }
+
+        # Aggregate status: green = all green, yellow = ollama or llm_provider
+        # missing (degraded but usable), red = vault or lancedb broken.
+        status = "green"
+        if not checks["vault"]["ok"] or not checks["lancedb"]["ok"]:
+            status = "red"
+        elif not checks["ollama"]["ok"] or not checks["llm_provider"]["key_present"]:
+            status = "yellow"
+
+        return {
+            "status": status,
+            "checks": checks,
+            "vault_root": str(vault),
+            "active_calls": len(request.app.state.registry),
+        }
+
+
+def _ping_ollama() -> dict:
+    """Best-effort liveness probe for Ollama. Two-second timeout so a
+    dead/missing Ollama doesn't slow the diagnostics endpoint."""
+    try:
+        import httpx
+
+        with httpx.Client(timeout=2.0) as client:
+            response = client.get("http://127.0.0.1:11434/api/tags")
+            if response.status_code != 200:
+                return {"ok": False, "status_code": response.status_code}
+            data = response.json()
+            tags = [m.get("name", "") for m in data.get("models", [])]
+            has_embed_model = any("nomic-embed-text" in tag for tag in tags)
+            return {
+                "ok": True,
+                "has_nomic_embed_text": has_embed_model,
+                "models": tags[:20],
+            }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:200]}

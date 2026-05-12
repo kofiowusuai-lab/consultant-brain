@@ -167,11 +167,98 @@ uv run pytest
 
 `@requires_ollama` tests skip cleanly when Ollama isn't running locally. CI without Ollama still gets 90+ tests covering schemas, vault writes, ingest plumbing, retrieval ranking, and the service.
 
-## What's next
+## Phase 8 — completing the brain
 
-The master prompt's 7 phases are complete. Future work that didn't make the master prompt:
+Phase 8 closes every empty folder in the vault and ships the production polish the master prompt deferred. Fourteen items in one batch:
 
-- **Stakeholder graph (`07_People/`)** — auto-built from every named individual across atoms + contacts. Useful for "who said this" / "what does this person care about" lookups.
-- **Weekly reviews (`08_Reviews/`)** — auto-generated per-week summaries: which clients moved, which patterns fired, which scores trended up.
-- **CRM linking** — atom `client` field → `CRMOrganization` UUID lookup against the Swift app's SQLite. Eliminates the "two namespaces" issue (live UUID call_id vs canonical call_note_id) by joining at the org level.
-- **Swift suggestion-referenced UI** — tappable "got it" / "said it" button on each Memory-panel atom in the overlay so the acceptance-rate metric gets real data.
+### CRM linking (item 1)
+
+Every atom now carries `client_org_id: UUID | null` linking back to a row in the Swift CRM's SQLite. The brain reads `~/Library/Application Support/Consultant Copilot/CRM/crm.sqlite` in read-only mode, resolves client display name → UUID at ingest time, and stamps the UUID on every atom + call note. Display-name renames in the Swift CRM no longer fragment the atom graph.
+
+### Plays auto-promotion (`05_Plays/`) + cold layer (item 7)
+
+Atoms of type `commitment` / `objection` / `win_signal` whose body shingles overlap (Jaccard ≥0.4) across ≥3 distinct clients get auto-promoted to a Play. Each play file carries a four-frame template (opener / frame / response / handle) the consultant fills in by hand. Plays now fire alongside patterns from the cold retrieval layer — surfaced first because they require more evidence to promote.
+
+### Stakeholder graph (`07_People/`) + Weekly reviews (`08_Reviews/`) (items 2, 3)
+
+`distill` regenerates one markdown per CRM contact, listing every atom mentioning them by name; click the file in Obsidian's graph view to see the cross-org connections. `consultant-brain weekly --week 2026-W19` writes a per-ISO-week review of clients touched, atoms minted by type, top moves recommended for next week. Both files preserve hand-edited pinned sections across regeneration.
+
+### Tag normalization + atom retirement (items 9, 8)
+
+`distill` runs two more passes on every invocation:
+- **Tag normalization** folds near-duplicate tags (`nextstep`, `followup`, `follow_up`, `next-step` → `next_step`) using a canonical alias map plus Levenshtein-radius-2 merge.
+- **Retirement lifecycle** flips atoms `active → needs_review` after 120 days without re-observation, then `needs_review → retired` after another 30. Retired atoms are kept on disk but excluded from retrieval + pattern mining.
+
+### Multi-LLM provider abstraction (item 13)
+
+The atom extractor + live moment detector now route through an `LLMProvider` Protocol with concrete implementations for **Anthropic, OpenAI, OpenRouter, DeepSeek, and Kimi (Moonshot)**. Pick a provider per-task via:
+
+```bash
+# Per call
+uv run consultant-brain ingest --extractor-provider openrouter
+
+# Or pin globally
+export BRAIN_LLM_PROVIDER=deepseek
+export BRAIN_MOMENT_PROVIDER=kimi
+```
+
+Or via the Swift app: **Settings → Brain → LLM Providers** picks the extractor + moment-detector providers independently. API keys live in the same secrets.json as the Anthropic + OpenAI keys (`openai-api-key`, `openrouter-api-key`, `deepseek-api-key`, `kimi-api-key`).
+
+The Anthropic provider attaches `cache_control: {"type": "ephemeral"}` to the system prompt — ~70% token-cost cut after the first cache hit per 5-minute TTL. OpenAI auto-caches prefixes ≥1024 tokens; OpenRouter routes the cache_control through to upstream providers that support it.
+
+### Real post-call extraction (item 5)
+
+`/call_end` now optionally runs the full atom extractor against the live transcript. The placeholder summary string is gone; call notes carry real Claude-written prose, and any atoms the live moment detector missed get backfilled. Toggle via `CONSULTANT_BRAIN_POST_CALL_EXTRACT=1` (Swift app sets it from the Brain Settings toggle).
+
+### Backup + restore + anonymized export (items 10, 11)
+
+```bash
+uv run consultant-brain backup                                  # → ~/Documents/ConsultantBrain-backups/<ts>.tar.gz
+uv run consultant-brain restore --from <tar> --vault /tmp/v
+uv run consultant-brain export --out ~/Desktop/anon --anonymize # → safe to share
+```
+
+The export rewrites client + stakeholder names + emails to `[CLIENT_N]` / `[PERSON_N]` / `[EMAIL_N]` while preserving every pattern + play structurally intact.
+
+### `/metrics` + `/diagnostics` endpoints (items 12, 14)
+
+```bash
+curl http://127.0.0.1:8787/metrics     # Phase 7 dashboard as JSON
+curl http://127.0.0.1:8787/diagnostics # vault + LanceDB + Ollama + LLM-key readiness
+```
+
+The Swift app's new **Brain Status** window renders both live (refresh every 5s). The dashboard sidebar's always-visible **Brain** indicator (green/yellow/red dot) polls `/diagnostics` every 10s — click to open Brain Status, right-click for **Run Health Check Now / Open Brain Settings / Restart Brain Service**.
+
+### Swift "Reference this" UI (item 4)
+
+Tap any Memory atom in the overlay → POSTs `/suggestion_referenced` and the row flashes green for 1.5s. Powers the acceptance-rate metric with real signal.
+
+### New CLI subcommands
+
+| Subcommand | Purpose |
+|---|---|
+| `weekly [--week 2026-W19]` | Generate `08_Reviews/<week>.md` |
+| `backup [--out path]` | Snapshot vault + LanceDB to a tarball |
+| `restore --from <tar> --vault <target>` | Restore a vault from a backup |
+| `export --out <dir> [--no-anonymize]` | Shareable export of patterns + plays |
+
+`distill` itself now runs all six passes (tags → retirement → patterns → plays → people → context) — skip any with `--skip-tags`, `--skip-retirement`, `--skip-plays`, `--skip-people`, `--skip-patterns`, `--skip-context`.
+
+### Acceptance per item
+
+| # | Item | Pass test |
+|---|---|---|
+| 1 | CRM linking | New atom on a known client has `client_org_id` matching the CRM row |
+| 2 | Stakeholder graph | `distill` produces `07_People/<slug>.md` linking back to org + listing every atom mentioning them |
+| 3 | Weekly reviews | `consultant-brain weekly` produces `08_Reviews/<YYYY-Www>.md` |
+| 4 | Swift Reference UI | Tap Memory atom → `/suggestion_referenced` event logged in <200ms |
+| 5 | Real call-end extraction | Call note carries Claude-written summary, not the placeholder |
+| 6 | Prompt caching | Anthropic responses report `cache_read_input_tokens > 0` on call 2+ |
+| 7 | Plays | After 3 calls with same opener in 3 clients, `05_Plays/<seed>.md` exists |
+| 8 | Atom retirement | Atom with `last_seen` 130d ago → `status: needs_review` after `distill` |
+| 9 | Tag normalization | Atoms tagged `nextstep`/`followup`/`next_step` all rewritten to `next_step` |
+| 10 | Backup | Tarball round-trips byte-identically |
+| 11 | Export | No real client/email/UUID survives anonymized export |
+| 12 | `/metrics` + Brain Status window | Window renders live data, refreshes every 5s |
+| 13 | Multi-LLM providers | `--extractor-provider deepseek` succeeds; unit tests assert each provider's wire shape |
+| 14 | Brain health indicator | Dashboard dot turns green → yellow → red as deps fail; click opens Brain Status |
