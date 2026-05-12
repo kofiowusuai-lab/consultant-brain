@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# uv lockfile is checked in via uv sync; nothing to ignore.
+
+# pytest + coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor cruft
+.DS_Store
+.vscode/
+.idea/
+
+# Local-only test artifacts
+tests/_tmp/
+*.lance/

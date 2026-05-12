@@ -1,0 +1,35 @@
+[project]
+name = "consultant-brain"
+version = "0.1.0"
+description = "Active brain for Consultant Copilot: ingests live-call transcripts into an Obsidian-backed atom graph"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Casper" }]
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "python-frontmatter>=1.1",
+    "anthropic>=0.40",
+    "ollama>=0.3",
+    "lancedb>=0.13",
+    "pyarrow>=16",
+    "python-ulid>=2.7",
+]
+
+[project.scripts]
+consultant-brain = "consultant_brain.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-mock>=3.14",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.4,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
