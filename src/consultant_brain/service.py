@@ -21,9 +21,25 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from pydantic import BaseModel, Field
 
+from consultant_brain.context_dumps import (
+    ContextDumpPreview,
+    ContextDumpPreviewStore,
+    commit_preview as _commit_dump_preview,
+    run_preview as _run_dump_preview,
+)
 from consultant_brain.crm.resolver import CRMResolver
 from consultant_brain.live_call_finalizer import finalize_live_call
 from consultant_brain.live_loop import maybe_run_moment_detection
@@ -237,8 +253,45 @@ def create_app(*, vault_root: Path | None = None, registry: LiveCallRegistry | N
     ).lower() in ("1", "true", "yes", "on")
     app.state.extractor_provider_cache = None
 
+    # Phase 10: per-client context-dump previews. In-memory store keyed
+    # by ULID; the upload endpoint pushes, the commit endpoint pops.
+    # TTL configurable via env so tests can dial it down for eviction
+    # checks without sleeping 30 min.
+    _ttl = int(os.environ.get("CONSULTANT_BRAIN_CONTEXT_DUMP_TTL_SECONDS", "1800"))
+    app.state.context_dump_previews = ContextDumpPreviewStore(ttl_seconds=_ttl)
+
     _register_routes(app)
     return app
+
+
+def _preview_to_dto(preview: ContextDumpPreview) -> dict:
+    """Serialize a ContextDumpPreview into the JSON the Swift client
+    (or curl test) consumes. Atoms are exposed as plain dicts so the
+    UI can render + toggle them without needing the full ExtractedAtom
+    schema on the client side."""
+    return {
+        "preview_id": preview.preview_id,
+        "client_name": preview.client_name,
+        "client_slug": preview.client_slug,
+        "observed_at": preview.observed_at.isoformat(),
+        "uploaded_at": preview.uploaded_at.replace(microsecond=0).isoformat() + "Z",
+        "source_filename": preview.source_filename,
+        "source_kind_label": preview.source_kind_label,
+        "summary": preview.summary,
+        "raw_text_excerpt": preview.raw_text_excerpt,
+        "warnings": list(preview.warnings),
+        "notes": preview.notes,
+        "atoms": [
+            {
+                "index": index,
+                "type": atom.type.value,
+                "body": atom.body,
+                "confidence": atom.confidence,
+                "tags": list(atom.tags),
+            }
+            for index, atom in enumerate(preview.atoms)
+        ],
+    }
 
 
 def _get_extractor_provider(app) -> LLMProvider | None:
@@ -554,6 +607,160 @@ def _register_routes(app: FastAPI) -> None:
             window_chars=len(window),
             generated_at=datetime.now(timezone.utc),
         )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Phase 10 — per-client context dumps (PDF / DOCX / image / audio / ZIP)
+    # ──────────────────────────────────────────────────────────────────
+
+    @app.post("/context_dump")
+    async def context_dump_upload(
+        request: Request,
+        file: UploadFile = File(...),
+        client_name: str = Form(...),
+        observed_at: str = Form(...),
+        notes: str | None = Form(default=None),
+        extractor_provider: str | None = Form(default=None),
+    ) -> dict:
+        """Phase 10: upload one file → preview (no vault write yet).
+
+        Returns a `ContextDumpPreviewDTO` with the proposed atoms +
+        warnings the user reviews before committing. The user POSTs
+        `/context_dump/commit` with the preview_id to actually write.
+        """
+        from datetime import date as _date
+
+        import tempfile
+
+        if not client_name.strip():
+            raise HTTPException(status_code=400, detail="`client_name` is required")
+        try:
+            observed_at_date = _date.fromisoformat(observed_at.strip())
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"`observed_at` must be YYYY-MM-DD: {exc}",
+            ) from exc
+
+        # Pick provider (LLMProvider if configured, otherwise the legacy
+        # AnthropicClient path so the call works with just the Anthropic
+        # key in secrets.json).
+        provider = None
+        legacy_client = None
+        if extractor_provider and extractor_provider != "anthropic":
+            try:
+                provider = build_provider(extractor_provider)
+            except ProviderError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+        else:
+            try:
+                provider = _get_extractor_provider(request.app)
+            except Exception:
+                provider = None
+            if provider is None:
+                from consultant_brain.extractor import real_anthropic_client
+                from consultant_brain.secrets import (
+                    SecretNotFoundError,
+                    get_anthropic_key,
+                )
+
+                try:
+                    legacy_client = real_anthropic_client(get_anthropic_key())
+                except SecretNotFoundError as exc:
+                    raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        # Spool the upload to a tmp file the parser can mmap; cleaned
+        # up by the OS once we exit the context.
+        suffix = Path(file.filename or "").suffix.lower()
+        with tempfile.NamedTemporaryFile(
+            prefix="brain-dump-",
+            suffix=suffix,
+            delete=False,
+        ) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+
+        try:
+            preview = _run_dump_preview(
+                file_path=tmp_path,
+                client_name=client_name.strip(),
+                observed_at=observed_at_date,
+                notes=notes.strip() if notes else None,
+                vault_root=request.app.state.vault_root,
+                provider=provider,
+                client=legacy_client,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        request.app.state.context_dump_previews.put(preview)
+        return _preview_to_dto(preview)
+
+    @app.get("/context_dump/{preview_id}")
+    def context_dump_get(preview_id: str, request: Request) -> dict:
+        """Fetch a stashed preview by id. Returns 404 if it's gone
+        (committed, discarded, or evicted by TTL)."""
+        preview = request.app.state.context_dump_previews.get(preview_id)
+        if preview is None:
+            raise HTTPException(status_code=404, detail="Preview not found or expired")
+        return _preview_to_dto(preview)
+
+    @app.post("/context_dump/commit")
+    def context_dump_commit(body: dict, request: Request) -> dict:
+        """Commit a preview to the vault. Body:
+
+          { "preview_id": "01HX...", "accepted_atom_indexes": [0, 2, 4] }
+
+        `accepted_atom_indexes` is optional; omit to commit every atom
+        in the preview."""
+        preview_id = (body or {}).get("preview_id")
+        if not isinstance(preview_id, str) or not preview_id.strip():
+            raise HTTPException(status_code=400, detail="`preview_id` is required")
+
+        store = request.app.state.context_dump_previews
+        preview = store.pop(preview_id)
+        if preview is None:
+            raise HTTPException(status_code=404, detail="Preview not found or expired")
+
+        accepted = body.get("accepted_atom_indexes")
+        if accepted is not None and not isinstance(accepted, list):
+            raise HTTPException(
+                status_code=400,
+                detail="`accepted_atom_indexes` must be a list of ints.",
+            )
+
+        try:
+            result = _commit_dump_preview(
+                preview=preview,
+                vault_root=request.app.state.vault_root,
+                accepted_atom_indexes=accepted,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Re-stash the preview so the user can retry without
+            # re-uploading.
+            store.put(preview)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        return {
+            "preview_id": result.preview_id,
+            "dump_note_path": str(result.dump_note_path),
+            "atom_count": result.atom_count,
+            "client_slug": result.client_slug,
+        }
+
+    @app.delete("/context_dump/{preview_id}")
+    def context_dump_discard(preview_id: str, request: Request) -> dict:
+        """Drop a preview without committing — cleans up its tmp file.
+        Useful when the user reviews the proposed atoms and decides
+        not to keep them."""
+        store = request.app.state.context_dump_previews
+        dropped = store.discard(preview_id)
+        return {"preview_id": preview_id, "discarded": dropped}
 
     # ──────────────────────────────────────────────────────────────────
     # Phase 9 — learn from external sources (YouTube / Instagram)

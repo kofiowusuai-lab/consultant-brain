@@ -18,7 +18,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import frontmatter
@@ -38,6 +38,7 @@ VAULT_SUBDIRS: tuple[str, ...] = (
     "07_People",
     "08_Reviews",
     "09_Knowledge",  # Phase 9: source notes from videos / articles
+    "10_ContextDumps",  # Phase 10: per-client off-call context drops
     "_Indexes",
 )
 
@@ -79,6 +80,17 @@ class VaultLayout:
     def knowledge_dir(self) -> Path:
         """Phase 9: source notes (one markdown per ingested video / article)."""
         return self.root / "09_Knowledge"
+
+    @property
+    def context_dumps_dir(self) -> Path:
+        """Phase 10: per-client context drops. Each client gets a subdir
+        (slug-based) holding one note per dump."""
+        return self.root / "10_ContextDumps"
+
+    def context_dump_file(self, client_slug: str, dump_id: str, observed_at: date) -> Path:
+        """`10_ContextDumps/<slug>/<observed_at>_<dump_id>.md`. Observed-at
+        prefix sorts dumps chronologically in Obsidian's file pane."""
+        return self.context_dumps_dir / client_slug / f"{observed_at.isoformat()}_{dump_id}.md"
 
     def atom_file(self, atom_id: str) -> Path:
         return self.atoms_dir / f"{atom_id}.md"
@@ -394,6 +406,84 @@ def write_knowledge_note(
 </details>
 """
     path = layout.knowledge_dir / f"{source_id}.md"
+    _atomic_write(path, _dump_frontmatter(fm, body))
+    return path
+
+
+def write_context_dump_note(
+    layout: VaultLayout,
+    *,
+    dump_id: str,
+    client_name: str,
+    client_slug: str,
+    observed_at: date,
+    uploaded_at_iso: str,
+    source_filename: str,
+    source_kind_label: str,
+    summary: str,
+    atom_ids: list[str],
+    raw_text: str,
+    notes: str | None,
+    warnings: list[str],
+) -> Path:
+    """Phase 10: per-client context-dump note.
+
+    Lives at `10_ContextDumps/<client_slug>/<observed_at>_<dump_id>.md`.
+    Mirrors `write_knowledge_note`'s shape — frontmatter + Summary +
+    atom-link list + raw text inside <details>.
+    """
+    layout.context_dumps_dir.mkdir(parents=True, exist_ok=True)
+    client_subdir = layout.context_dumps_dir / client_slug
+    client_subdir.mkdir(parents=True, exist_ok=True)
+
+    fm: dict = {
+        "id": dump_id,
+        "kind": "context_dump",
+        "source_kind": "context_dump",
+        "client": f"[[{client_name}]]" if client_name else None,
+        "observed_at": observed_at.isoformat(),
+        "uploaded_at": uploaded_at_iso,
+        "source_filename": source_filename,
+        "source_kind_label": source_kind_label,
+        "atom_count": len(atom_ids),
+        "warnings": list(warnings) if warnings else None,
+        "notes": notes,
+    }
+    fm = {k: v for k, v in fm.items() if v is not None}
+
+    atom_links_section = (
+        "\n".join(f"- [[{atom_id}]]" for atom_id in atom_ids)
+        if atom_ids
+        else "_No atoms extracted from this dump._"
+    )
+    warnings_section = (
+        "\n".join(f"- ⚠️ {w}" for w in warnings) if warnings else "_None._"
+    )
+    notes_section = notes.strip() if notes else "_None._"
+
+    body = f"""# {client_name} — context dump · {observed_at.isoformat()}
+
+## Summary
+{summary}
+
+## User notes
+{notes_section}
+
+## Warnings
+{warnings_section}
+
+## Atoms
+{atom_links_section}
+
+## Raw text
+<details>
+<summary>Source text</summary>
+
+{raw_text}
+
+</details>
+"""
+    path = layout.context_dump_file(client_slug, dump_id, observed_at)
     _atomic_write(path, _dump_frontmatter(fm, body))
     return path
 

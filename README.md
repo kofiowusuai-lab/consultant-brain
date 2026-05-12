@@ -324,3 +324,67 @@ curl -X POST http://127.0.0.1:8787/learn -H 'Content-Type: application/json' -d 
   "allow_whisper": false
 }'
 ```
+
+## Phase 10 — per-client context dumps
+
+The brain isn't limited to calls + curated videos anymore. Any off-call context attached to a specific client — sent docs, photos of whiteboards, recordings of in-person conversations — can flow into the vault through a preview-first pipeline.
+
+### Workflow
+
+1. Open the Swift dashboard → select a client (e.g. Reece) → the **Context section header** carries a "Context Dump" button.
+2. Pick a file, set the **date the event actually happened**, optionally add notes.
+3. The brain parses the file, transcribes audio, runs the context-dump extractor, and returns a **preview** of proposed atoms + a summary. Vault is untouched.
+4. Toggle off any noisy atoms, then click **Commit to Brain**. Atoms write to `03_Atoms/` with `last_seen` = your observed-at date, and a one-shot note lands in `10_ContextDumps/<client_slug>/<observed_at>_<id>.md`.
+
+### Headless CLI
+
+```bash
+# Preview only — see what the brain would extract without writing
+uv run consultant-brain dump -f ~/Desktop/coffee.m4a -c Reece -w 2026-05-12 --preview-only
+
+# Direct commit
+uv run consultant-brain dump -f ./pricing.pdf -c Acme --notes "from May 4 email"
+```
+
+### Supported file types
+
+| Extension | Backend | Notes |
+|---|---|---|
+| `.pdf` | pypdf | Image-only PDFs warn + return no atoms — drop the page in as a JPG instead. |
+| `.docx` | python-docx | Paragraph-by-paragraph text join. |
+| `.txt` / `.md` | stdlib | Direct UTF-8 read. |
+| `.jpg` / `.png` / `.webp` | Claude vision | OCR + factual description in one call. HEIC isn't accepted by Claude; convert via Preview first. |
+| `.mp3` / `.wav` / `.m4a` / `.mp4` / `.mov` / `.flac` / `.ogg` | OpenAI Whisper | Reuses the Phase 9 stack with a local-file refactor. |
+| `.zip` | stdlib zipfile | Depth-1 recursion — every direct child gets parsed, results stitched into one ParsedDoc. |
+
+### Why a preview gate
+
+A context dump comes from a free-form source (a photo, a 25-min recording). The extractor's atom proposals will sometimes carry noise — a side-comment in the audio, a passing reference on a whiteboard. The preview lets you toggle individual atoms off before they hit the vault, so retrieval doesn't end up surfacing junk during a live call.
+
+### Time awareness
+
+Every extractor invocation now sees `Today is YYYY-MM-DD. This {call,source,context} was observed on YYYY-MM-DD.` as the first line of its user prompt, so relative references ("yesterday", "next Friday", "the Q3 deadline we discussed") resolve correctly. Context-dump atoms have `last_seen = your observed_at date`, which feeds retrieval's existing recency-decay (`_recency_score`) — a Tuesday coffee uploaded Thursday ranks like Tuesday context, not Thursday context.
+
+### Service endpoints
+
+```bash
+# Upload + preview (multipart)
+curl -F file=@coffee.m4a \
+     -F client_name=Reece \
+     -F observed_at=2026-05-12 \
+     -F 'notes=25-min coffee, mostly pricing' \
+     http://127.0.0.1:8787/context_dump
+
+# Commit (optionally with a subset)
+curl -X POST http://127.0.0.1:8787/context_dump/commit \
+     -H 'Content-Type: application/json' \
+     -d '{"preview_id":"01HX...","accepted_atom_indexes":[0,2,4]}'
+
+# Refetch a stashed preview
+curl http://127.0.0.1:8787/context_dump/01HX...
+
+# Discard without committing
+curl -X DELETE http://127.0.0.1:8787/context_dump/01HX...
+```
+
+Previews live in memory keyed by ULID and evict after 30 minutes (`CONSULTANT_BRAIN_CONTEXT_DUMP_TTL_SECONDS` to override).

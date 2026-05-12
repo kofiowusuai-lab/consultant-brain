@@ -20,6 +20,31 @@ class WhisperError(RuntimeError):
     """Raised when audio download or transcription fails."""
 
 
+def transcribe_local_audio(
+    audio_path: Path,
+    *,
+    model: str = "whisper-1",
+) -> str:
+    """Phase 10: transcribe a local audio file (mp3 / wav / m4a / ogg /
+    flac / mp4 / mov) via the OpenAI hosted Whisper API.
+
+    No yt-dlp step — the caller already has the file on disk. Used by
+    the context-dump parser and any future "drop an audio file"
+    pipeline. Same OpenAI key lookup + error shape as
+    `transcribe_url_with_whisper`.
+    """
+    try:
+        api_key = get_openai_key()
+    except SecretNotFoundError as exc:
+        raise WhisperError(
+            "OPENAI_API_KEY missing — Whisper transcription requires the OpenAI key in "
+            "secrets.json (`openai-api-key`)."
+        ) from exc
+    if not audio_path.exists() or not audio_path.is_file():
+        raise WhisperError(f"Audio file not found: {audio_path}")
+    return _whisper_transcribe(audio_path, api_key=api_key, model=model)
+
+
 def transcribe_url_with_whisper(
     url: str,
     *,

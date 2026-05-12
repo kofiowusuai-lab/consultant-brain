@@ -74,6 +74,11 @@ class SourceKind(str, Enum):
     instagram = "instagram"
     article = "article"
     podcast = "podcast"
+    # Phase 10: off-call context dropped in by the user — PDFs, DOCX,
+    # images, audio recordings of in-person conversations. Atoms get
+    # `last_seen = user-supplied observed_at` so retrieval orders them
+    # by when the event happened, not when the file got uploaded.
+    context_dump = "context_dump"
 
 
 class Speaker(str, Enum):
@@ -166,6 +171,12 @@ class Atom(BaseModel):
     tags: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
     evidence_count: int = Field(default=1, ge=1)
+    # When the event this atom describes actually happened. For call
+    # atoms this is the call's date; for context dumps it's the
+    # user-supplied "observed_at"; for video/article atoms it's the
+    # published_at when available, else the fetch date. Retrieval's
+    # recency decay reads this — so a Tuesday coffee uploaded Thursday
+    # ranks like Tuesday context, not Thursday context.
     last_seen: date
     created_at: datetime
     status: AtomStatus = AtomStatus.active

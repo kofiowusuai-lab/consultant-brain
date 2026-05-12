@@ -153,6 +153,126 @@ def learn(
 
 
 @app.command()
+def dump(
+    file: Path = typer.Option(
+        ...,
+        "--file",
+        "-f",
+        help="PDF / DOCX / TXT / image / audio / ZIP path.",
+        exists=True,
+        readable=True,
+    ),
+    client: str = typer.Option(
+        ...,
+        "--client",
+        "-c",
+        help="Client display name (must match an existing client; new clients can be created via Swift).",
+    ),
+    when: str = typer.Option(
+        None,
+        "--when",
+        "-w",
+        help="When the event happened (YYYY-MM-DD). Defaults to today.",
+    ),
+    notes: str | None = typer.Option(
+        None,
+        "--notes",
+        help="Free-form notes the extractor will see ('25-min coffee at Verve, mostly pricing').",
+    ),
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    preview_only: bool = typer.Option(
+        False,
+        "--preview-only",
+        help="Run parse + extract and print the proposed atoms; don't commit to the vault.",
+    ),
+    extractor_provider: str | None = typer.Option(
+        None,
+        "--extractor-provider",
+        help="Override LLM provider (anthropic / openai / openrouter / deepseek / kimi).",
+    ),
+) -> None:
+    """Phase 10: ingest off-call context (document, photo, audio, zip).
+
+    Headless analog of the Swift "Context Dump" sheet. Use `--preview-only`
+    to inspect the proposed atoms before committing; omit it to commit
+    straight away.
+
+    Examples:
+      consultant-brain dump -f ~/Desktop/coffee.m4a -c Reece -w 2026-05-12
+      consultant-brain dump -f ./pricing.pdf -c Acme --notes "from May 4 email"
+      consultant-brain dump -f ./bundle.zip -c Reece --preview-only
+    """
+    from datetime import date as _date, datetime as _datetime, timezone as _tz
+
+    from consultant_brain.context_dumps import (
+        commit_preview as _commit_preview,
+        run_preview as _run_preview,
+    )
+    from consultant_brain.extractor import real_anthropic_client
+    from consultant_brain.llm.provider import ProviderError
+    from consultant_brain.llm.registry import build_provider
+    from consultant_brain.secrets import SecretNotFoundError, get_anthropic_key
+
+    if when is None:
+        observed_at = _datetime.now(_tz.utc).date()
+    else:
+        try:
+            observed_at = _date.fromisoformat(when)
+        except ValueError as exc:
+            raise typer.BadParameter(f"--when must be YYYY-MM-DD: {exc}") from exc
+
+    provider = None
+    legacy_client = None
+    if extractor_provider and extractor_provider != "anthropic":
+        try:
+            provider = build_provider(extractor_provider)
+        except ProviderError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    else:
+        try:
+            legacy_client = real_anthropic_client(get_anthropic_key())
+        except SecretNotFoundError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+    preview = _run_preview(
+        file_path=file,
+        client_name=client,
+        observed_at=observed_at,
+        notes=notes,
+        vault_root=vault,
+        provider=provider,
+        client=legacy_client,
+    )
+    typer.echo(
+        f"Parsed {preview.source_kind_label} file: {preview.source_filename}"
+    )
+    typer.echo(f"Observed: {preview.observed_at.isoformat()}")
+    typer.echo(f"Summary: {preview.summary}")
+    typer.echo(f"Atoms ({len(preview.atoms)}):")
+    for index, atom in enumerate(preview.atoms):
+        body = atom.body if len(atom.body) <= 100 else atom.body[:97] + "..."
+        typer.echo(f"  [{index}] {atom.type.value:<12} {body}")
+    if preview.warnings:
+        typer.secho("Warnings:", fg=typer.colors.YELLOW)
+        for w in preview.warnings:
+            typer.secho(f"  · {w}", fg=typer.colors.YELLOW)
+
+    if preview_only:
+        typer.secho(
+            "\n--preview-only: skipping vault commit. "
+            f"Re-run without the flag to commit (preview_id={preview.preview_id}).",
+            fg=typer.colors.CYAN,
+        )
+        return
+
+    commit_result = _commit_preview(preview=preview, vault_root=vault)
+    typer.echo(
+        f"\nCommitted {commit_result.atom_count} atoms · "
+        f"note: {commit_result.dump_note_path.relative_to(vault)}"
+    )
+
+
+@app.command()
 def query(
     text: str = typer.Argument(..., help="Semantic search query."),
     vault: Path = typer.Option(

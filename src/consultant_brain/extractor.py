@@ -29,6 +29,8 @@ from consultant_brain.llm.provider import (
     LLMProvider,
     ProviderError,
 )
+from datetime import date
+
 from consultant_brain.schemas import (
     DEFAULT_EXTRACTOR_MODEL,
     AtomType,
@@ -113,15 +115,51 @@ Output strict JSON only. No commentary, no markdown fences. Schema:
 """
 
 
-def build_user_prompt(transcript: str, call_type: CallType, client_name: str | None) -> str:
-    """One-shot prompt: transcript + call type + (optional) client name."""
+def build_user_prompt(
+    transcript: str,
+    call_type: CallType,
+    client_name: str | None,
+    *,
+    observed_at: "date | None" = None,
+    today: "date | None" = None,
+) -> str:
+    """One-shot prompt: transcript + call type + (optional) client name.
+
+    Phase 10: optionally include a `Today is …. Observed on ….` preamble
+    so the LLM can resolve relative dates ("yesterday", "next Friday")
+    against the right reference points instead of training-data prior.
+    """
     client_line = f"Client: {client_name}\n" if client_name else ""
+    time_line = _build_time_preamble(observed_at=observed_at, today=today, kind="call")
     return f"""\
-{client_line}Call type: {call_type.value}
+{time_line}{client_line}Call type: {call_type.value}
 
 Transcript:
 {transcript}
 """
+
+
+def _build_time_preamble(
+    *,
+    observed_at: "date | None",
+    today: "date | None",
+    kind: str,
+) -> str:
+    """Single time-awareness line every extractor flavor shares.
+
+    `kind` is "call" / "source" / "context_dump" — appears in the line
+    so the LLM has the right frame for interpreting the date. Returns
+    "" when no dates are supplied (keeps existing call sites that
+    don't pass dates indistinguishable from before).
+    """
+    from datetime import datetime, timezone
+
+    parts: list[str] = []
+    today_d = today or datetime.now(timezone.utc).date()
+    parts.append(f"Today is {today_d.isoformat()}")
+    if observed_at is not None:
+        parts.append(f"this {kind} was observed on {observed_at.isoformat()}")
+    return ". ".join(parts) + ".\n"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -200,10 +238,22 @@ def build_knowledge_user_prompt(
     author: str | None,
     topic: str | None,
     for_client: str | None,
+    observed_at: "date | None" = None,
+    today: "date | None" = None,
 ) -> str:
     """Prompt for `extract_from_source` — emphasizes that the source
-    is external context, not a client call."""
-    lines = [f"Source title: {source_title}"]
+    is external context, not a client call.
+
+    Phase 10: optional `observed_at` + `today` weave a time preamble in
+    so relative dates resolve correctly.
+    """
+    time_line = _build_time_preamble(
+        observed_at=observed_at, today=today, kind="source"
+    )
+    lines: list[str] = []
+    if time_line:
+        lines.append(time_line.rstrip())
+    lines.append(f"Source title: {source_title}")
     if author:
         lines.append(f"Author / speaker: {author}")
     if topic:
@@ -217,6 +267,157 @@ def build_knowledge_user_prompt(
     lines.append("Transcript:")
     lines.append(transcript)
     return "\n".join(lines)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase 10 — context-dump extraction (off-call drops, in-person convos)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+CONTEXT_DUMP_SYSTEM_PROMPT = """\
+You are a context extractor for a senior consultant's knowledge graph.
+
+The user is dropping in OFF-CALL CONTEXT about ONE specific client —
+a document they sent, a photo of a whiteboard, a recording of an
+in-person conversation, a screenshot of a Slack thread. The consultant
+wants the brain to remember this so it can surface relevant moments
+during future calls with this client.
+
+Return a JSON object:
+  - "summary": 1-3 sentences. What is this context about, and what
+    should the consultant remember from it before the next call?
+  - "atoms": a list of typed atomic notes.
+
+All seven atom types are valid here — context dumps often carry the
+same shape of moments calls do:
+
+  insight       — observation about how the client thinks / what
+                  matters to them, anchored to something specific they
+                  said or wrote.
+  objection     — concern, hesitation, pushback from the client.
+  commitment    — concrete promise either side made (email exchange,
+                  signed proposal, in-person agreement).
+  win_signal    — enthusiasm, scope expansion, buying signal.
+  loss_signal   — deflection, going silent, "let me think about it".
+  confusion     — clarifying question, repeated something back wrong.
+  client_fact   — specific verifiable fact about the client's business
+                  — numbers, tools, team size, workflow.
+
+Hard rules:
+  1. Every atom anchors to a specific date, number, name, phrase, or
+     visual detail from the input. If it could fit any other client,
+     you failed.
+  2. DO NOT invent facts. If the input is ambiguous, drop the atom.
+  3. Tag each atom with 1-5 lowercase snake_case keywords for retrieval.
+  4. Confidence 0.9+ for direct quotes / clear numbers; 0.6-0.8 for
+     clearly-stated principles; below 0.5 = don't emit.
+  5. Cap at ~25 atoms. Quality over quantity.
+  6. NEVER reference the extraction tool or that this came from a file.
+
+Output strict JSON only. No commentary, no markdown fences. Schema:
+
+{
+  "summary": "...",
+  "atoms": [
+    {
+      "type": "commitment",
+      "body": "...",
+      "confidence": 0.85,
+      "tags": ["pricing", "in_person"]
+    }
+  ]
+}
+"""
+
+
+def build_context_dump_user_prompt(
+    *,
+    text: str,
+    client_name: str,
+    source_kind_label: str,
+    source_filename: str,
+    notes: str | None,
+    observed_at: "date | None" = None,
+    today: "date | None" = None,
+) -> str:
+    """Prompt for `extract_from_context_dump`. Bundles the dump's
+    metadata into the user message so the model has full context."""
+    time_line = _build_time_preamble(
+        observed_at=observed_at, today=today, kind="context"
+    )
+    lines: list[str] = []
+    if time_line:
+        lines.append(time_line.rstrip())
+    lines.append(f"Client: {client_name}")
+    lines.append(f"Source kind: {source_kind_label}")
+    lines.append(f"Source filename: {source_filename}")
+    if notes:
+        lines.append("")
+        lines.append("User notes:")
+        lines.append(notes.strip())
+    lines.append("")
+    lines.append("Context:")
+    lines.append(text)
+    return "\n".join(lines)
+
+
+def extract_from_context_dump(
+    *,
+    text: str,
+    client_name: str,
+    source_kind_label: str,
+    source_filename: str,
+    notes: str | None = None,
+    observed_at: "date | None" = None,
+    today: "date | None" = None,
+    client: AnthropicClient | None = None,
+    provider: "LLMProvider | None" = None,
+    model: str = DEFAULT_EXTRACTOR_MODEL,
+    max_tokens: int = 8192,
+) -> ExtractorResult:
+    """Context-dump-tuned extractor. Same return shape as `extract()`
+    but with the off-call system prompt that permits the full 7-atom
+    palette (commitments/objections/etc. are valid here, unlike the
+    knowledge extractor)."""
+    if provider is None and client is None:
+        raise ExtractorError("extract_from_context_dump() requires `provider` or `client`")
+
+    user_prompt = build_context_dump_user_prompt(
+        text=text,
+        client_name=client_name,
+        source_kind_label=source_kind_label,
+        source_filename=source_filename,
+        notes=notes,
+        observed_at=observed_at,
+        today=today,
+    )
+
+    if provider is not None:
+        try:
+            response = provider.chat(
+                ChatRequest(
+                    system=CONTEXT_DUMP_SYSTEM_PROMPT,
+                    user=user_prompt,
+                    model=model,
+                    max_tokens=max_tokens,
+                    enable_prompt_cache=True,
+                )
+            )
+        except ProviderError as exc:
+            raise ExtractorError(str(exc)) from exc
+        raw_text = response.text
+    else:
+        assert client is not None
+        resp = client.messages_create(
+            model=model,
+            system=CONTEXT_DUMP_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+            max_tokens=max_tokens,
+        )
+        raw_text = _concat_text(resp)
+
+    payload = _parse_json_strict(raw_text)
+    return ExtractorResult.model_validate(payload)
 
 
 def extract_from_source(
