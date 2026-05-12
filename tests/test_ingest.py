@@ -191,3 +191,90 @@ def test_run_ingest_is_idempotent(tmp_path: Path) -> None:
     layout = VaultLayout.for_root(vault_root)
     assert len(list(layout.atoms_dir.glob("*.md"))) == 3
     assert len(list(layout.calls_dir.glob("*.md"))) == 1
+
+
+def test_run_ingest_re_ingest_overwrites_atom_body(tmp_path: Path) -> None:
+    """If the extractor returns a different body on re-ingest (e.g. prompt
+    tuning produced a sharper phrasing), the existing atom file is updated
+    in place — not duplicated as a new file.
+    """
+    vault_root = tmp_path / "vault"
+    first_response = json.dumps(
+        {
+            "summary": "v1 summary",
+            "atoms": [
+                {"type": "objection", "body": "first version body.", "confidence": 0.8, "tags": []},
+            ],
+        }
+    )
+    second_response = json.dumps(
+        {
+            "summary": "v2 summary, sharper.",
+            "atoms": [
+                {"type": "objection", "body": "second version body, much sharper.", "confidence": 0.85, "tags": []},
+            ],
+        }
+    )
+    run_ingest(
+        session_path=FIXTURE,
+        client_name="Reece",
+        call_type="consultingCall",
+        vault_root=vault_root,
+        redact=False,
+        dry_run=False,
+        client=_MockClient(first_response),
+    )
+    run_ingest(
+        session_path=FIXTURE,
+        client_name="Reece",
+        call_type="consultingCall",
+        vault_root=vault_root,
+        redact=False,
+        dry_run=False,
+        client=_MockClient(second_response),
+    )
+    layout = VaultLayout.for_root(vault_root)
+    atom_files = list(layout.atoms_dir.glob("*.md"))
+    assert len(atom_files) == 1
+    body_text = atom_files[0].read_text(encoding="utf-8")
+    assert "second version body, much sharper" in body_text
+    assert "first version body" not in body_text
+    # Call-note summary also updated.
+    call_text = list(layout.calls_dir.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "v2 summary, sharper" in call_text
+    assert "v1 summary" not in call_text
+
+
+def test_run_ingest_atom_ids_depend_on_session_filename(tmp_path: Path) -> None:
+    """Different session files MUST produce different atom IDs even if the
+    extractor returns identical atoms — otherwise re-ingesting call B would
+    clobber call A's atoms.
+    """
+    fixture_a = FIXTURE
+    fixture_b = tmp_path / "session-OTHER.json"
+    fixture_b.write_text(fixture_a.read_text())
+
+    first = run_ingest(
+        session_path=fixture_a,
+        client_name="Reece",
+        call_type="consultingCall",
+        vault_root=tmp_path / "vault",
+        redact=False,
+        dry_run=False,
+        client=_MockClient(VALID_RESPONSE),
+    )
+    second = run_ingest(
+        session_path=fixture_b,
+        client_name="Reece",
+        call_type="consultingCall",
+        vault_root=tmp_path / "vault",
+        redact=False,
+        dry_run=False,
+        client=_MockClient(VALID_RESPONSE),
+    )
+    first_ids = {p.stem for p in first.atom_paths}
+    second_ids = {p.stem for p in second.atom_paths}
+    assert first_ids.isdisjoint(second_ids), "Atom IDs collided across different sessions"
+    # And both sets of atoms persist on disk.
+    layout = VaultLayout.for_root(tmp_path / "vault")
+    assert len(list(layout.atoms_dir.glob("*.md"))) == 6  # 3 + 3
