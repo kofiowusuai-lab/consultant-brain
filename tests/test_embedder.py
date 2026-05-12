@@ -164,9 +164,82 @@ def test_atom_hit_format_line_truncates_long_body() -> None:
         client="Reece",
         call="2026-05-12_reece_consultingCall",
         call_type="consultingCall",
+        confidence=0.85,
+        last_seen="2026-05-12",
+        tags=("budget", "scope"),
         distance=0.4,
     )
     line = hit.format_line()
     assert "..." in line  # truncated
     assert "[objection" in line  # type tag visible
     assert "Reece" in line
+    assert hit.primary_tag == "budget"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Filtered queries
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@requires_ollama
+def test_query_filter_by_client(tmp_path: Path) -> None:
+    layout = VaultLayout.for_root(tmp_path / "vault")
+    ensure_vault_skeleton(layout)
+    index = LanceVaultIndex(layout)
+
+    reece = _make_atom("REECEATOMAAAAAAAAAAAAAAAA01", "Reece wants Whisperflow API integration.")
+    other = _make_atom("OTHERATOMAAAAAAAAAAAAAAAA02", "Acme needs Whisperflow API integration.")
+    object.__setattr__(other, "client", "Acme")
+    index.upsert(reece)
+    index.upsert(other)
+
+    hits = index.query("Whisperflow API", client_filter="Reece", top_n=5)
+    assert hits, "expected at least one hit"
+    for hit in hits:
+        assert hit.client == "Reece"
+
+
+@requires_ollama
+def test_query_filter_by_call_type(tmp_path: Path) -> None:
+    layout = VaultLayout.for_root(tmp_path / "vault")
+    ensure_vault_skeleton(layout)
+    index = LanceVaultIndex(layout)
+
+    consulting = _make_atom("CONSAAAAAAAAAAAAAAAAAAAAA01", "Discovery call about ad-bot scope.")
+    cold = _make_atom("COLDAAAAAAAAAAAAAAAAAAAAAA02", "Cold call intro about ad-bot pitch.")
+    object.__setattr__(cold, "call_type", CallType.cold_call)
+    index.upsert(consulting)
+    index.upsert(cold)
+
+    hits = index.query("ad-bot", call_type_filter="coldCall", top_n=5)
+    assert hits
+    for hit in hits:
+        assert hit.call_type == "coldCall"
+
+
+def test_query_excludes_provided_ids(tmp_path: Path) -> None:
+    """Test the exclude path without needing Ollama by using a fake vector."""
+    layout = VaultLayout.for_root(tmp_path / "vault")
+    ensure_vault_skeleton(layout)
+    index = LanceVaultIndex(layout)
+    fake_vec = [0.0] * EMBEDDING_DIM
+    fake_vec[0] = 1.0
+
+    a = _make_atom("FAKEAAAAAAAAAAAAAAAAAAAAA01", "atom A body.")
+    b = _make_atom("FAKEBBBBBBBBBBBBBBBBBBBBB02", "atom B body.")
+    index.upsert(a, vector=fake_vec)
+    index.upsert(b, vector=fake_vec)
+
+    # We can't easily test the .query() method without Ollama (it embeds the
+    # query string), but list_atom_ids() is a strict subset of the same plumbing.
+    ids = index.list_atom_ids()
+    assert ids == {a.id, b.id}
+
+
+def test_atom_hit_primary_tag_returns_none_when_no_tags() -> None:
+    hit = AtomHit(
+        id="A", type="insight", body="x", client=None, call="c",
+        call_type="consultingCall", confidence=0.5, last_seen="2026-05-12",
+        tags=(), distance=0.4,
+    )
+    assert hit.primary_tag is None

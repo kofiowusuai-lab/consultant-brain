@@ -30,6 +30,32 @@ EMBEDDING_MODEL = "nomic-embed-text"
 EMBEDDING_DIM = 768
 ATOMS_TABLE = "atoms"
 
+# Phase 2 evaluation found that prepending the atom type as a bracketed tag
+# improves clustering — objections cluster near other objections, commitments
+# near other commitments — which helps the warm-layer ranker disambiguate.
+# Toggleable so we can A/B test rapidly without rewriting embeddings.
+USE_TYPE_PREFIX = True
+
+
+def embedding_input_for(atom: Atom) -> str:
+    """The string passed to the embedder for a given atom. Centralized so the
+    embed-at-write path and the reindex path produce identical vectors.
+    """
+    if USE_TYPE_PREFIX:
+        return f"[{atom.type.value.upper()}] {atom.body}"
+    return atom.body
+
+
+def embedding_input_for_query(text: str, *, type_hint: str | None = None) -> str:
+    """Mirror image of embedding_input_for() for query strings. If we biased
+    atoms with a type prefix, queries should match the same convention.
+    A `type_hint` lets callers explicitly ask "find objections like this";
+    otherwise we omit the prefix so queries match all types.
+    """
+    if USE_TYPE_PREFIX and type_hint:
+        return f"[{type_hint.upper()}] {text}"
+    return text
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Embedding
@@ -69,7 +95,7 @@ def embed_text(text: str, *, model: str = EMBEDDING_MODEL) -> list[float]:
 @dataclass(frozen=True, slots=True)
 class AtomHit:
     """One query result. Includes enough fields to render a useful CLI line
-    without re-reading the markdown."""
+    + run warm-layer ranking + tag-based dedupe without re-reading markdown."""
 
     id: str
     type: str
@@ -77,6 +103,9 @@ class AtomHit:
     client: str | None
     call: str
     call_type: str
+    confidence: float
+    last_seen: str  # ISO date string; "" if missing from the index
+    tags: tuple[str, ...]
     distance: float
 
     @property
@@ -85,6 +114,12 @@ class AtomHit:
         [0, 2] (0 = identical direction, 2 = opposite). Convert to a [0,1]
         score where 1 is best."""
         return max(0.0, min(1.0, 1.0 - self.distance / 2.0))
+
+    @property
+    def primary_tag(self) -> str | None:
+        """First tag — used by warm-layer dedupe so we don't show 3 atoms
+        about the same topic in the suggestion panel."""
+        return self.tags[0] if self.tags else None
 
     def format_line(self) -> str:
         body_excerpt = self.body if len(self.body) <= 120 else self.body[:117] + "..."
@@ -95,7 +130,8 @@ class AtomHit:
 def _atoms_schema() -> pa.Schema:
     """PyArrow schema for the atoms LanceDB table. Keeps query results
     self-contained so callers don't have to round-trip back through the
-    vault markdown for common fields.
+    vault markdown for common fields. Phase 2 added last_seen + tags for
+    recency-boosted ranking + primary-tag dedupe.
     """
     return pa.schema(
         [
@@ -107,6 +143,8 @@ def _atoms_schema() -> pa.Schema:
             pa.field("call", pa.string()),
             pa.field("call_type", pa.string()),
             pa.field("confidence", pa.float32()),
+            pa.field("last_seen", pa.string()),  # ISO date YYYY-MM-DD
+            pa.field("tags", pa.list_(pa.string())),
         ]
     )
 
@@ -141,7 +179,7 @@ class LanceVaultIndex:
         existing rows with the same atom ID, so re-ingest is idempotent.
         """
         if vector is None:
-            vector = embed_text(atom.body)
+            vector = embed_text(embedding_input_for(atom))
         row = {
             "id": atom.id,
             "vector": vector,
@@ -151,6 +189,8 @@ class LanceVaultIndex:
             "call": atom.call,
             "call_type": atom.call_type.value,
             "confidence": float(atom.confidence),
+            "last_seen": atom.last_seen.isoformat(),
+            "tags": list(atom.tags),
         }
         table = self._table()
         # Delete-then-insert because LanceDB's merge_insert is unstable across
@@ -166,18 +206,48 @@ class LanceVaultIndex:
             count += 1
         return count
 
-    def query(self, text: str, *, top_n: int = 5) -> list[AtomHit]:
+    def query(
+        self,
+        text: str,
+        *,
+        top_n: int = 5,
+        client_filter: str | None = None,
+        call_type_filter: str | None = None,
+        exclude_atom_ids: set[str] | None = None,
+        type_hint: str | None = None,
+    ) -> list[AtomHit]:
+        """Semantic search the index. Optional `client_filter` /
+        `call_type_filter` push the constraint into LanceDB's SQL-ish where
+        clause so filtered queries don't pay for ranking atoms we'd throw
+        away. `exclude_atom_ids` lets the retrieval pipeline drop hot-layer
+        atoms before the warm layer surfaces them again.
+        """
         if not text or not text.strip():
             return []
         if ATOMS_TABLE not in self._existing_tables():
             return []
         table = self._db.open_table(ATOMS_TABLE)
-        vector = embed_text(text)
-        # Cosine because nomic-embed-text vectors are unit-normalized;
-        # L2 (the LanceDB default) produces 100+ distances on these.
-        results = table.search(vector).metric("cosine").limit(top_n).to_list()
+        vector = embed_text(embedding_input_for_query(text, type_hint=type_hint))
+        # Over-fetch by 3x when filters or excludes are active so the post-
+        # filter top_n is still a real top_n.
+        fetch_n = top_n * 3 if (client_filter or call_type_filter or exclude_atom_ids) else top_n
+
+        search = table.search(vector).metric("cosine")
+        where_clauses: list[str] = []
+        if client_filter:
+            where_clauses.append(f"client = '{_sql_escape(client_filter)}'")
+        if call_type_filter:
+            where_clauses.append(f"call_type = '{_sql_escape(call_type_filter)}'")
+        if where_clauses:
+            search = search.where(" AND ".join(where_clauses))
+
+        rows = search.limit(fetch_n).to_list()
+
+        excluded = exclude_atom_ids or set()
         hits: list[AtomHit] = []
-        for row in results:
+        for row in rows:
+            if row["id"] in excluded:
+                continue
             client = row.get("client") or None
             hits.append(
                 AtomHit(
@@ -187,12 +257,37 @@ class LanceVaultIndex:
                     client=client if client else None,
                     call=row["call"],
                     call_type=row["call_type"],
+                    confidence=float(row.get("confidence", 0.5)),
+                    last_seen=row.get("last_seen", "") or "",
+                    tags=tuple(row.get("tags") or ()),
                     distance=float(row.get("_distance", 0.0)),
                 )
             )
+            if len(hits) >= top_n:
+                break
         return hits
+
+    def list_atom_ids(self) -> set[str]:
+        """All atom IDs currently in the index. Used by `reindex` to figure
+        out which markdown files still need embedding. Uses to_arrow() so
+        we don't pull pandas into the dependency tree just for this lookup.
+        """
+        if ATOMS_TABLE not in self._existing_tables():
+            return set()
+        table = self._db.open_table(ATOMS_TABLE)
+        arrow_table = table.search().limit(0).to_arrow()  # gets schema
+        # Empty search returns 0 rows — switch to a full scan via head().
+        full = table.head(table.count_rows() or 1)
+        return {row["id"] for row in full.to_pylist()}
 
     def atom_count(self) -> int:
         if ATOMS_TABLE not in self._existing_tables():
             return 0
         return self._db.open_table(ATOMS_TABLE).count_rows()
+
+
+def _sql_escape(value: str) -> str:
+    """Escape single quotes for LanceDB's filter strings. The where()
+    builder doesn't expose parameter binding, so we sanitize the values
+    ourselves. The only escape character LanceDB needs is `'` → `''`."""
+    return value.replace("'", "''")
