@@ -1,0 +1,81 @@
+{
+  "startedAt": "2026-05-12T15:42:29Z",
+  "completedTurns": [
+    {
+      "completedAt": "2026-05-12T15:43:04Z",
+      "itemID": "item_a01",
+      "source": "microphone",
+      "text": "Walk me through what your current ad-bot workflow looks like — start to finish, no jargon."
+    },
+    {
+      "completedAt": "2026-05-12T15:43:30Z",
+      "itemID": "item_a02",
+      "source": "systemAudio",
+      "text": "Yeah so right now we have about a thousand notes in Obsidian, and the agent pulls from those to draft ad copy. Problem is it keeps grabbing the wrong sections — like it'll cite a note from six months ago when there's a fresher one."
+    },
+    {
+      "completedAt": "2026-05-12T15:44:02Z",
+      "itemID": "item_a03",
+      "source": "microphone",
+      "text": "Got it. So the retrieval is misfiring, not the generation. When you say wrong sections — is it grabbing entire wrong notes, or pulling the wrong chunks from the right notes?"
+    },
+    {
+      "completedAt": "2026-05-12T15:44:36Z",
+      "itemID": "item_a04",
+      "source": "systemAudio",
+      "text": "Mostly the wrong notes entirely. We don't have any tagging system — it's all timestamps and titles."
+    },
+    {
+      "completedAt": "2026-05-12T15:45:10Z",
+      "itemID": "item_a05",
+      "source": "microphone",
+      "text": "Okay. Before solutions — what does a winning ad look like for you? Like if the bot drafted three and one was perfect, what makes it perfect?"
+    },
+    {
+      "completedAt": "2026-05-12T15:45:48Z",
+      "itemID": "item_a06",
+      "source": "systemAudio",
+      "text": "Honestly? I haven't decided. We just know the ones the team writes manually convert at like 2.3x what the bot's drafts do. So the bot is failing some bar but I can't tell you the bar exactly."
+    },
+    {
+      "completedAt": "2026-05-12T15:46:20Z",
+      "itemID": "item_a07",
+      "source": "microphone",
+      "text": "That's actually the bigger problem. Until we name what winning looks like, we're tuning blind. What I'd want to do in week one is sit with three of your best manual ads and reverse-engineer the rubric. Then the bot has something to aim at. Sound right?"
+    },
+    {
+      "completedAt": "2026-05-12T15:46:55Z",
+      "itemID": "item_a08",
+      "source": "systemAudio",
+      "text": "Yeah that makes sense. What does this cost? Like ballpark."
+    },
+    {
+      "completedAt": "2026-05-12T15:47:20Z",
+      "itemID": "item_a09",
+      "source": "microphone",
+      "text": "Depends on scope but a 10-day pilot is usually 12k fixed. We can talk numbers once we've scoped properly. For now — can you pull the three best ads your team has run this quarter and share them by Friday?"
+    },
+    {
+      "completedAt": "2026-05-12T15:47:48Z",
+      "itemID": "item_a10",
+      "source": "systemAudio",
+      "text": "Yeah I can have those by Friday."
+    }
+  ],
+  "partialSources": {},
+  "partialSpeakers": {},
+  "partialTranscripts": {},
+  "processedSegmentIDs": [],
+  "suggestions": [
+    {
+      "category": "respond",
+      "createdAt": "2026-05-12T15:44:40Z",
+      "text": "Got it — so we're solving for retrieval first, not generation. That changes the whole build."
+    },
+    {
+      "category": "private_note",
+      "createdAt": "2026-05-12T15:46:05Z",
+      "text": "He's said 'I think' four times about the ad-bot scope. He hasn't decided what 'winning ad' means. Don't quote until he commits to a definition."
+    }
+  ]
+}
