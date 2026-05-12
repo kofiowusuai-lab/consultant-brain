@@ -186,6 +186,37 @@ def reindex(
 
 
 @app.command()
+def metrics(
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    corpus: Path = typer.Option(
+        None,
+        "--corpus",
+        help="Path to a labeled retrieval-precision corpus (see SCHEMAS.md). When omitted, the precision row reports '—'.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON instead of the text summary."),
+) -> None:
+    """Phase 7: print the self-evaluation dashboard.
+
+    Four metrics, each only computed when its source data exists:
+      - Retrieval precision  (requires --corpus pointing at labeled queries)
+      - Suggestion acceptance rate  (requires /suggestions emits + /suggestion_referenced events)
+      - Score-prediction MAE  (requires user overrides in score_corrections.jsonl)
+      - Pattern stability  (requires ≥2 pattern snapshots written by `distill`)
+    """
+    from consultant_brain.evaluation.metrics import (
+        compute_metrics,
+        render_report_json,
+        render_report_text,
+    )
+
+    report = compute_metrics(vault_root=vault, corpus_path=corpus)
+    if json_output:
+        typer.echo(render_report_json(report))
+    else:
+        typer.echo(render_report_text(report))
+
+
+@app.command()
 def score(
     call_id: str = typer.Argument(..., help="Call note ID, e.g. 2026-05-12_reece_consultingCall."),
     vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
@@ -282,6 +313,10 @@ def distill(
             f"updated {pattern_result.patterns_updated}, "
             f"skipped {pattern_result.candidates_skipped} below threshold."
         )
+        # Phase 7: every mine pass snapshots the pattern state so the
+        # stability metric has a time-series to compute against.
+        from consultant_brain.evaluation.pattern_stability import take_snapshot
+        take_snapshot(vault_root=vault)
 
     if not skip_context:
         context_results = regenerate_all_clients(vault_root=vault)

@@ -37,6 +37,10 @@ from consultant_brain.scoring.features import FEATURE_NAMES, compute_features
 from consultant_brain.scoring.loader import CallNotFoundError, load_call_for_scoring
 from consultant_brain.scoring.score import compute_score
 from consultant_brain.scoring.weights import ScoringWeightsTable
+from consultant_brain.evaluation.suggestion_log import (
+    log_emit as _log_suggestion_emit,
+    log_referenced as _log_suggestion_referenced,
+)
 
 
 DEFAULT_VAULT = Path.home() / "ConsultantBrain"
@@ -162,6 +166,20 @@ class ScoreOverrideResponse(BaseModel):
     user_score: float
     delta: float
     corrections_count: int  # total corrections in the log AFTER this write
+
+
+class SuggestionReferencedRequest(BaseModel):
+    """Phase 7: Swift posts this when the consultant acts on (says, paraphrases,
+    references) a suggestion. Powers the acceptance-rate metric."""
+
+    call_id: str = Field(min_length=1)
+    atom_id: str = Field(min_length=1)
+
+
+class SuggestionReferencedResponse(BaseModel):
+    call_id: str
+    atom_id: str
+    logged: bool
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -448,9 +466,43 @@ def _register_routes(app: FastAPI) -> None:
             vault_root=vault,
         )
         panel = result.top_for_panel(hot=hot, warm=warm, cold=cold)
+        suggestions = [SuggestionDTO.from_ranked_hit(rh) for rh in panel]
+        # Phase 7: log each emit so acceptance-rate can match against
+        # POST /suggestion_referenced events later. Errors here never
+        # propagate — the metric is non-critical.
+        for s in suggestions:
+            try:
+                _log_suggestion_emit(
+                    vault_root=vault,
+                    call_id=call_id,
+                    atom_id=s.atom_id,
+                    layer=s.layer,
+                    score=s.score,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return SuggestionsResponse(
             call_id=call_id,
-            suggestions=[SuggestionDTO.from_ranked_hit(rh) for rh in panel],
+            suggestions=suggestions,
             window_chars=len(window),
             generated_at=datetime.now(timezone.utc),
         )
+
+    @app.post("/suggestion_referenced", response_model=SuggestionReferencedResponse)
+    def suggestion_referenced(
+        body: SuggestionReferencedRequest,
+        request: Request,
+    ) -> SuggestionReferencedResponse:
+        """Swift app POSTs here when the consultant acts on a brain
+        suggestion (says it / paraphrases it / clicks "got it" in the
+        overlay). Feeds the acceptance-rate metric."""
+        vault: Path = request.app.state.vault_root
+        try:
+            _log_suggestion_referenced(
+                vault_root=vault,
+                call_id=body.call_id,
+                atom_id=body.atom_id,
+            )
+        except Exception:
+            return SuggestionReferencedResponse(call_id=body.call_id, atom_id=body.atom_id, logged=False)
+        return SuggestionReferencedResponse(call_id=body.call_id, atom_id=body.atom_id, logged=True)

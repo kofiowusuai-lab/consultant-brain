@@ -82,6 +82,25 @@ uv run consultant-brain suggest \
 
 Returns the panel slice the live copilot would show: 1 hot + 2 warm + 1 cold atom by default. `--explain` prints rank components (similarity / recency / confidence / final score).
 
+### Self-evaluation (Phase 7)
+
+```bash
+uv run consultant-brain metrics --vault ~/ConsultantBrain
+# With a labeled corpus for retrieval precision:
+uv run consultant-brain metrics --vault ~/ConsultantBrain --corpus ~/labels.json
+# Machine-readable:
+uv run consultant-brain metrics --vault ~/ConsultantBrain --json
+```
+
+Four metrics, each only computed when its source data exists:
+
+- **Retrieval precision** — pass `--corpus path/to/labels.json` with hand-labeled `{queries: [{name, window, client, call_type, relevant_atom_ids}, ...]}`. Reports P@1/P@3/P@5 + perfect-top-1 count.
+- **Suggestion acceptance rate** — `/suggestions` logs every emit; `POST /suggestion_referenced` from the Swift app logs each user-referenced atom. Pairs emits with referenced events within a 90s window; reports overall + per-layer.
+- **Score-prediction MAE** — mean absolute error between predicted and user-overridden scores, plus the master prompt's calibration target ("% within ±10"). Per-call-type breakdown.
+- **Pattern stability** — `distill` snapshots pattern state on every run; metric compares the latest with the most recent snapshot ≥30 days old, reports % patterns that persisted + mean observation-count delta per surviving pattern.
+
+When a metric's source data isn't ready (no corpus / no override yet / one snapshot only), the report shows `—` instead of fake zeros. Honest dashboard by design.
+
 ### Distillation (Phase 6)
 
 ```bash
@@ -136,6 +155,7 @@ Endpoints:
 - `POST /call_end` — `{ call_id }`
 - `GET /score?call_id=X[&primary_win=...]` — 0–100 score + per-feature breakdown
 - `POST /score_override` — `{ call_id, user_score, primary_win? }`
+- `POST /suggestion_referenced` — `{ call_id, atom_id }` — Phase 7 acceptance-rate hook
 
 Port 8787 by default (not 8765 — that's OpenClaw's shared swap port). `--reload` for dev auto-reload.
 
@@ -147,6 +167,11 @@ uv run pytest
 
 `@requires_ollama` tests skip cleanly when Ollama isn't running locally. CI without Ollama still gets 90+ tests covering schemas, vault writes, ingest plumbing, retrieval ranking, and the service.
 
-## Out of scope this phase
+## What's next
 
-Stakeholder graph (07_People) · weekly reviews (08_Reviews) · CRM linking (atom client field → CRMOrganization UUID) · metrics dashboard / self-evaluation (Phase 7). Each gets its own plan when we ship it.
+The master prompt's 7 phases are complete. Future work that didn't make the master prompt:
+
+- **Stakeholder graph (`07_People/`)** — auto-built from every named individual across atoms + contacts. Useful for "who said this" / "what does this person care about" lookups.
+- **Weekly reviews (`08_Reviews/`)** — auto-generated per-week summaries: which clients moved, which patterns fired, which scores trended up.
+- **CRM linking** — atom `client` field → `CRMOrganization` UUID lookup against the Swift app's SQLite. Eliminates the "two namespaces" issue (live UUID call_id vs canonical call_note_id) by joining at the org level.
+- **Swift suggestion-referenced UI** — tappable "got it" / "said it" button on each Memory-panel atom in the overlay so the acceptance-rate metric gets real data.
