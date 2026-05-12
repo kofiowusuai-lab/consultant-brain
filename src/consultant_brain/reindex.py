@@ -28,6 +28,7 @@ from consultant_brain.schemas import (
     AtomStatus,
     AtomType,
     CallType,
+    SourceKind,
 )
 from consultant_brain.vault import VaultLayout
 
@@ -96,6 +97,8 @@ def _atom_from_markdown(path: Path) -> Atom:
     meta = dict(post.metadata)
 
     body = (post.content or "").strip()
+    raw_kind = meta.get("source_kind")
+    source_kind = SourceKind(raw_kind) if raw_kind else SourceKind.call
     return Atom(
         id=meta["id"],
         type=AtomType(meta["type"]),
@@ -103,6 +106,9 @@ def _atom_from_markdown(path: Path) -> Atom:
         client_org_id=_coerce_uuid(meta.get("client_org_id")),
         call=_strip_wikilink(meta["call"]),
         call_type=CallType(meta["call_type"]),
+        source_kind=source_kind,
+        source_url=meta.get("source_url"),
+        source_title=meta.get("source_title"),
         tags=list(meta.get("tags") or []),
         confidence=float(meta.get("confidence", 0.5)),
         evidence_count=int(meta.get("evidence_count", 1)),

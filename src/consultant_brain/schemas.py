@@ -59,6 +59,23 @@ class AtomStatus(str, Enum):
     needs_review = "needs_review"
 
 
+class SourceKind(str, Enum):
+    """Phase 9: where an atom came from.
+
+    Call atoms (`call`) drive Memory during live calls. Knowledge atoms
+    (`youtube`, `instagram`, `article`, `podcast`) live in
+    `09_Knowledge/`, get a separate retrieval layer, and stay out of
+    Memory by default — so external "guru" content doesn't blur into
+    real client signal during a call.
+    """
+
+    call = "call"
+    youtube = "youtube"
+    instagram = "instagram"
+    article = "article"
+    podcast = "podcast"
+
+
 class Speaker(str, Enum):
     """Normalized speaker identity. The Swift app's `source` field uses
     `systemAudio` (= the other person) and `microphone` (= the consultant) —
@@ -138,8 +155,14 @@ class Atom(BaseModel):
     # the display name; None otherwise so the atom stays usable even before
     # the CRM record exists (the resolver fills it in on the next distill pass).
     client_org_id: Optional[UUID] = None
-    call: str  # call note ID this atom was extracted from; renders as `[[<call>]]`
+    call: str  # call note ID OR source ID (e.g. `youtube_HD2RU2QZxJk`); renders as `[[<id>]]`
     call_type: CallType
+    # Phase 9: provenance. Defaults to `call` so existing atoms parse
+    # unchanged. `youtube` / `instagram` / etc. tag external knowledge
+    # so retrieval can keep client signal and guru content separated.
+    source_kind: SourceKind = SourceKind.call
+    source_url: Optional[str] = None
+    source_title: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
     evidence_count: int = Field(default=1, ge=1)

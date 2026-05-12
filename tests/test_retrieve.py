@@ -289,7 +289,31 @@ def test_top_for_panel_caps_each_layer() -> None:
         hot=[rh(i, "hot") for i in range(3)],
         warm=[rh(i, "warm") for i in range(5)],
         cold=[rh(i, "cold") for i in range(2)],
+        knowledge=[rh(i, "knowledge") for i in range(4)],
     )
+    panel = result.top_for_panel(hot=1, warm=2, cold=1, knowledge=2)
+    assert len(panel) == 6
+    assert [rh.layer for rh in panel] == [
+        "hot",
+        "warm",
+        "warm",
+        "cold",
+        "knowledge",
+        "knowledge",
+    ]
+
+
+def test_top_for_panel_defaults_knowledge_to_zero() -> None:
+    """Live calls don't surface knowledge unless explicitly requested."""
+    rh = RankedHit(
+        hit=None,  # type: ignore[arg-type]
+        similarity=0.9,
+        recency=0.5,
+        confidence=0.8,
+        score=0.9,
+        layer="knowledge",
+        reason="external",
+    )
+    result = RetrievalResult(knowledge=[rh])
     panel = result.top_for_panel(hot=1, warm=2, cold=1)
-    assert len(panel) == 4
-    assert [rh.layer for rh in panel] == ["hot", "warm", "warm", "cold"]
+    assert len(panel) == 0  # knowledge ignored unless caller asks for it

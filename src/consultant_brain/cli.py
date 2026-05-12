@@ -82,6 +82,77 @@ def ingest(
 
 
 @app.command()
+def learn(
+    url: str = typer.Option(
+        ...,
+        "--url",
+        "-u",
+        help="YouTube or Instagram URL. Future: article/podcast.",
+    ),
+    topic: str | None = typer.Option(
+        None,
+        "--topic",
+        "-t",
+        help="Topic tag added to every extracted atom (e.g. 'ai-sales', 'pricing').",
+    ),
+    for_client: str | None = typer.Option(
+        None,
+        "--for-client",
+        help="Tie knowledge to one client so retrieval prefers it during that client's prep.",
+    ),
+    allow_whisper: bool = typer.Option(
+        False,
+        "--whisper",
+        help="Allow yt-dlp + OpenAI Whisper fallback when no captions are available (or required for IG).",
+    ),
+    cookies_from_browser: str | None = typer.Option(
+        None,
+        "--cookies-from-browser",
+        help="Browser name (chrome/safari/firefox) to pull cookies from — needed for private IG content.",
+    ),
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Fetch + extract atoms but skip writing.",
+    ),
+    extractor_provider: str | None = typer.Option(
+        None,
+        "--extractor-provider",
+        help="Override LLM provider (anthropic / openai / openrouter / deepseek / kimi).",
+    ),
+) -> None:
+    """Phase 9: learn from a YouTube or Instagram video.
+
+    Fetches the transcript, runs the knowledge-tuned extractor, writes
+    one note per source to 09_Knowledge/ + one atom per insight to
+    03_Atoms/. Atoms carry source_kind so retrieval can keep external
+    knowledge out of live-call Memory by default.
+
+    Instagram requires --whisper. Public IG Reels work via yt-dlp +
+    OpenAI Whisper. Private content needs --cookies-from-browser chrome.
+
+    Examples:
+      consultant-brain learn --url 'https://youtu.be/HD2RU2QZxJk' --topic ai-sales
+      consultant-brain learn --url 'https://instagram.com/reel/Cabc/' --whisper
+      consultant-brain learn --url 'https://youtu.be/...' --for-client Reece
+    """
+    from consultant_brain.learn import run_learn
+
+    result = run_learn(
+        url=url,
+        vault_root=vault,
+        topic=topic,
+        for_client=for_client,
+        allow_whisper=allow_whisper,
+        cookies_from_browser=cookies_from_browser,
+        dry_run=dry_run,
+        extractor_provider_name=extractor_provider,
+    )
+    typer.echo(result.summary_line())
+
+
+@app.command()
 def query(
     text: str = typer.Argument(..., help="Semantic search query."),
     vault: Path = typer.Option(

@@ -148,6 +148,9 @@ def _atoms_schema() -> pa.Schema:
             pa.field("confidence", pa.float32()),
             pa.field("last_seen", pa.string()),  # ISO date YYYY-MM-DD
             pa.field("tags", pa.list_(pa.string())),
+            # Phase 9: source provenance — empty string for legacy rows
+            # so older atoms keep matching the default "call" filter.
+            pa.field("source_kind", pa.string()),
         ]
     )
 
@@ -194,6 +197,7 @@ class LanceVaultIndex:
             "confidence": float(atom.confidence),
             "last_seen": atom.last_seen.isoformat(),
             "tags": list(atom.tags),
+            "source_kind": atom.source_kind.value,
         }
         table = self._table()
         # Delete-then-insert because LanceDB's merge_insert is unstable across
@@ -216,14 +220,16 @@ class LanceVaultIndex:
         top_n: int = 5,
         client_filter: str | None = None,
         call_type_filter: str | None = None,
+        source_kind_filter: str | tuple[str, ...] | None = None,
         exclude_atom_ids: set[str] | None = None,
         type_hint: str | None = None,
     ) -> list[AtomHit]:
-        """Semantic search the index. Optional `client_filter` /
-        `call_type_filter` push the constraint into LanceDB's SQL-ish where
-        clause so filtered queries don't pay for ranking atoms we'd throw
-        away. `exclude_atom_ids` lets the retrieval pipeline drop hot-layer
-        atoms before the warm layer surfaces them again.
+        """Semantic search the index. Optional filters push the
+        constraint into LanceDB's SQL-ish where clause.
+
+        `source_kind_filter`: a string (one kind) or a tuple of strings
+        (any of). Phase 9 retrieval uses this to keep external knowledge
+        out of live-call Memory unless explicitly opted in.
         """
         if not text or not text.strip():
             return []
@@ -233,7 +239,10 @@ class LanceVaultIndex:
         vector = embed_text(embedding_input_for_query(text, type_hint=type_hint))
         # Over-fetch by 3x when filters or excludes are active so the post-
         # filter top_n is still a real top_n.
-        fetch_n = top_n * 3 if (client_filter or call_type_filter or exclude_atom_ids) else top_n
+        any_filter = (
+            client_filter or call_type_filter or source_kind_filter or exclude_atom_ids
+        )
+        fetch_n = top_n * 3 if any_filter else top_n
 
         search = table.search(vector).metric("cosine")
         where_clauses: list[str] = []
@@ -241,6 +250,20 @@ class LanceVaultIndex:
             where_clauses.append(f"client = '{_sql_escape(client_filter)}'")
         if call_type_filter:
             where_clauses.append(f"call_type = '{_sql_escape(call_type_filter)}'")
+        if source_kind_filter:
+            kinds = (
+                (source_kind_filter,) if isinstance(source_kind_filter, str)
+                else tuple(source_kind_filter)
+            )
+            # Legacy rows have source_kind = "" (column not present pre-Phase 9
+            # OR pre-existing rows). Treat empty string as "call" so historical
+            # atoms still come back when caller asks for call-only.
+            kind_or_clauses = [
+                f"source_kind = '{_sql_escape(k)}'" for k in kinds
+            ]
+            if "call" in kinds:
+                kind_or_clauses.append("source_kind = ''")
+            where_clauses.append("(" + " OR ".join(kind_or_clauses) + ")")
         if where_clauses:
             search = search.where(" AND ".join(where_clauses))
 

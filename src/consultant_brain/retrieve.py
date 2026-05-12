@@ -70,20 +70,35 @@ class RankedHit:
 @dataclass(frozen=True, slots=True)
 class RetrievalResult:
     """Output of one retrieval call. Layers are kept separate so the UI can
-    render them with distinct styling (Hot = chip, Warm = card, Cold = play).
+    render them with distinct styling (Hot = chip, Warm = card, Cold = play,
+    Knowledge = library scroll, Phase 9).
     """
 
     hot: list[RankedHit] = field(default_factory=list)
     warm: list[RankedHit] = field(default_factory=list)
     cold: list[RankedHit] = field(default_factory=list)
+    knowledge: list[RankedHit] = field(default_factory=list)
 
     @property
     def all(self) -> list[RankedHit]:
-        return [*self.hot, *self.warm, *self.cold]
+        return [*self.hot, *self.warm, *self.cold, *self.knowledge]
 
-    def top_for_panel(self, *, hot: int = 1, warm: int = 2, cold: int = 1) -> list[RankedHit]:
-        """The exact slice the live suggestion panel renders."""
-        return [*self.hot[:hot], *self.warm[:warm], *self.cold[:cold]]
+    def top_for_panel(
+        self,
+        *,
+        hot: int = 1,
+        warm: int = 2,
+        cold: int = 1,
+        knowledge: int = 0,
+    ) -> list[RankedHit]:
+        """The exact slice the live suggestion panel renders. `knowledge`
+        defaults to 0 — prep view passes a positive number to opt in."""
+        return [
+            *self.hot[:hot],
+            *self.warm[:warm],
+            *self.cold[:cold],
+            *self.knowledge[:knowledge],
+        ]
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -98,12 +113,18 @@ def retrieve(
     call_type: CallType,
     vault_root: Path,
     now: Optional[date] = None,
+    include_knowledge: bool = False,
 ) -> RetrievalResult:
     """The function the CLI + future FastAPI service both call.
 
     Doesn't open the LanceDB index if the vault has no `00_System/` dir —
     returns an empty result so the live copilot stays alive on a fresh
     machine where no ingests have happened yet.
+
+    Phase 9: `include_knowledge=False` (the default for live calls)
+    keeps externally-sourced atoms out of Hot + Warm so Memory
+    surfaces only the consultant's own call history. Prep mode flips
+    it to True; the knowledge layer surfaces beside warm.
     """
     layout = VaultLayout.for_root(vault_root)
     if not layout.system_dir.exists():
@@ -115,7 +136,13 @@ def retrieve(
 
     today = now or datetime.now(timezone.utc).date()
 
-    hot = _hot_layer(index=index, client=client, transcript_window=transcript_window, today=today)
+    hot = _hot_layer(
+        index=index,
+        client=client,
+        transcript_window=transcript_window,
+        today=today,
+        include_knowledge=include_knowledge,
+    )
     hot_ids = {hit.hit.id for hit in hot}
 
     warm = _warm_layer(
@@ -124,11 +151,23 @@ def retrieve(
         call_type=call_type,
         excluded_ids=hot_ids,
         today=today,
+        include_knowledge=include_knowledge,
     )
 
     cold = _cold_layer(vault_root=vault_root, transcript_window=transcript_window, today=today)
 
-    return RetrievalResult(hot=hot, warm=warm, cold=cold)
+    knowledge: list[RankedHit] = []
+    if include_knowledge:
+        excluded = hot_ids | {hit.hit.id for hit in warm}
+        knowledge = _knowledge_layer(
+            index=index,
+            transcript_window=transcript_window,
+            client=client,
+            excluded_ids=excluded,
+            today=today,
+        )
+
+    return RetrievalResult(hot=hot, warm=warm, cold=cold, knowledge=knowledge)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -137,18 +176,28 @@ def retrieve(
 
 
 def _hot_layer(
-    *, index: LanceVaultIndex, client: str | None, transcript_window: str, today: date
+    *,
+    index: LanceVaultIndex,
+    client: str | None,
+    transcript_window: str,
+    today: date,
+    include_knowledge: bool = False,
 ) -> list[RankedHit]:
     """Atoms already on file about this client, ranked by semantic relevance
     to the current transcript window so the panel surfaces the most-likely-
     useful one first. If no client is given, hot is empty — those atoms only
     matter when we know who's on the call.
+
+    Phase 9: hot defaults to `source_kind=call` only — external knowledge
+    tagged for this client lives in the Knowledge layer, not Memory.
     """
     if not client or not transcript_window.strip():
         return []
+    source_filter = None if include_knowledge else ("call",)
     raw_hits = index.query(
         text=transcript_window,
         client_filter=client,
+        source_kind_filter=source_filter,
         top_n=HOT_LAYER_MAX,
     )
     return [
@@ -169,6 +218,7 @@ def _warm_layer(
     call_type: CallType,
     excluded_ids: set[str],
     today: date,
+    include_knowledge: bool = False,
 ) -> list[RankedHit]:
     """Vector search across all atoms (this client + others), filtered by
     the current call_type so we don't surface a cold-call opener during a
@@ -177,13 +227,19 @@ def _warm_layer(
     After raw vector ranking we re-rank with a weighted blend of similarity
     + recency + confidence, then dedupe by (type, primary_tag) bucket so the
     panel doesn't show three "objection: budget" atoms in a row.
+
+    Phase 9: warm stays `source_kind=call` only by default. Prep flow flips
+    `include_knowledge=True` to let the same window pull in external
+    insights alongside the consultant's call history.
     """
     if not transcript_window.strip():
         return []
+    source_filter = None if include_knowledge else ("call",)
     # Pull twice the cap so dedupe still leaves us with WARM_LAYER_MAX atoms.
     raw_hits = index.query(
         text=transcript_window,
         call_type_filter=call_type.value,
+        source_kind_filter=source_filter,
         exclude_atom_ids=excluded_ids,
         top_n=WARM_LAYER_MAX * 2,
     )
@@ -210,6 +266,76 @@ def _dedupe_by_tag(ranked: list[RankedHit], *, per_bucket: int) -> list[RankedHi
         buckets[key] = buckets.get(key, 0) + 1
         kept.append(r)
     return kept
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase 9 — Knowledge layer (external sources)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+# Max atoms emitted by the knowledge layer in one retrieval call.
+KNOWLEDGE_LAYER_MAX = 6
+# `source_kind` values that count as external knowledge (everything
+# except `call`). Tuple form because the embedder accepts tuples.
+KNOWLEDGE_SOURCE_KINDS: tuple[str, ...] = ("youtube", "instagram", "article", "podcast")
+
+
+def _knowledge_layer(
+    *,
+    index: LanceVaultIndex,
+    transcript_window: str,
+    client: str | None,
+    excluded_ids: set[str],
+    today: date,
+) -> list[RankedHit]:
+    """Atoms minted from external sources (videos, articles, podcasts).
+
+    Only fires when the caller opts in (`include_knowledge=True`) —
+    prep view does, the live overlay does not by default. Atoms tagged
+    with `for-client` on `learn` get a confidence boost when the
+    current client matches, so "studied with Reece in mind" surfaces
+    for Reece's calls first.
+    """
+    if not transcript_window.strip():
+        return []
+    raw_hits = index.query(
+        text=transcript_window,
+        source_kind_filter=KNOWLEDGE_SOURCE_KINDS,
+        exclude_atom_ids=excluded_ids,
+        top_n=KNOWLEDGE_LAYER_MAX * 2,
+    )
+    out: list[RankedHit] = []
+    for hit in raw_hits:
+        reason_bits = [f"{_kind_label(hit)} knowledge"]
+        if client and hit.client == client:
+            reason_bits.append(f"tagged for {client}")
+        out.append(
+            _rank_hit(
+                hit,
+                layer="knowledge",
+                today=today,
+                reason=" · ".join(reason_bits),
+            )
+        )
+    out.sort(key=lambda r: r.score, reverse=True)
+    return out[:KNOWLEDGE_LAYER_MAX]
+
+
+def _kind_label(hit) -> str:
+    """Best-effort source-kind label for the reason string. The
+    embedder's AtomHit doesn't include source_kind today (we'd need to
+    extend the schema) — fall back to the call-id prefix which is
+    deterministic from `learn`."""
+    call = (hit.call or "").lower()
+    if call.startswith("youtube_"):
+        return "YouTube"
+    if call.startswith("instagram_"):
+        return "Instagram"
+    if call.startswith("podcast_"):
+        return "Podcast"
+    if call.startswith("article_"):
+        return "Article"
+    return "External"
 
 
 # ────────────────────────────────────────────────────────────────────────────

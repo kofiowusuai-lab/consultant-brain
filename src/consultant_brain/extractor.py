@@ -125,6 +125,158 @@ Transcript:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Phase 9 — knowledge extraction (videos, articles, podcasts)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+KNOWLEDGE_SYSTEM_PROMPT = """\
+You are a knowledge extractor for a senior consultant's reference library.
+
+You read transcripts from EXTERNAL SOURCES (YouTube videos, Instagram
+Reels, podcasts, articles) — not the consultant's own calls. Your job
+is to mine timeless insights, reusable frameworks, and concrete
+verifiable facts the consultant can lean on later. You are NOT mining
+client commitments / objections / win-or-loss signals — those are
+call-specific.
+
+Return a JSON object:
+  - "summary": 1-3 sentences. What is this source about? Who is the
+    speaker / author? Why might a consultant care?
+  - "atoms": a list of typed atomic notes.
+
+You may only emit these atom types from external sources:
+
+  insight       — a non-obvious observation, principle, or pattern the
+                  speaker articulates. The kind of thing the consultant
+                  would scribble in a margin and reuse.
+                  Example: "The mistake most agencies make is selling
+                  the deliverable instead of the outcome."
+
+  client_fact   — a verifiable, specific fact: a number, a tool, a
+                  technique, a workflow detail. Anchored to something
+                  concrete in the source.
+                  Example: "Hormozi's team runs 4 cold emails per
+                  prospect per week and stops at 6 if no reply."
+
+  win_signal    — a pattern of WHAT WORKS, articulated as a claim.
+                  Reusable language for the consultant's own calls.
+                  Example: "When a prospect mentions a deadline first,
+                  ask 'what happens if you miss it?' — turns vague
+                  urgency into concrete loss aversion."
+
+Hard rules:
+  1. Atoms are atomic: 1-3 sentences max. No essays.
+  2. Every atom is anchored to a specific moment, number, name, or
+     phrase in the source. If a generic "always be closing"-flavor
+     truism could fit any context, skip it.
+  3. Tag each atom with 1-5 lowercase snake_case keywords. Include the
+     source's topic when caller supplies one.
+  4. Confidence: 0.9+ for direct quotes or specific numbers; 0.6-0.8
+     for clearly-articulated principles. Below 0.5: don't emit.
+  5. Cap at ~20 atoms per source. Quality over quantity.
+  6. NEVER fabricate a number, name, or claim. If the source is vague
+     about a fact, don't emit a client_fact for it.
+
+Output strict JSON only. No commentary, no markdown fences. Schema:
+
+{
+  "summary": "...",
+  "atoms": [
+    {
+      "type": "insight",
+      "body": "...",
+      "confidence": 0.82,
+      "tags": ["sales", "framing"]
+    }
+  ]
+}
+"""
+
+
+def build_knowledge_user_prompt(
+    *,
+    transcript: str,
+    source_title: str,
+    author: str | None,
+    topic: str | None,
+    for_client: str | None,
+) -> str:
+    """Prompt for `extract_from_source` — emphasizes that the source
+    is external context, not a client call."""
+    lines = [f"Source title: {source_title}"]
+    if author:
+        lines.append(f"Author / speaker: {author}")
+    if topic:
+        lines.append(f"Topic (caller-supplied): {topic}")
+    if for_client:
+        lines.append(
+            f"Studied with this client in mind: {for_client}. Atoms may "
+            f"reference relevance to {for_client} if obvious."
+        )
+    lines.append("")
+    lines.append("Transcript:")
+    lines.append(transcript)
+    return "\n".join(lines)
+
+
+def extract_from_source(
+    *,
+    transcript: str,
+    source_title: str,
+    author: str | None,
+    topic: str | None = None,
+    for_client: str | None = None,
+    client: AnthropicClient | None = None,
+    provider: "LLMProvider | None" = None,
+    model: str = DEFAULT_EXTRACTOR_MODEL,
+    max_tokens: int = 8192,
+) -> ExtractorResult:
+    """Knowledge-tuned extractor. Same return shape as `extract()`, but
+    biased toward `insight` / `client_fact` / `win_signal` atoms with
+    the call-specific types (commitment / objection / etc.) suppressed.
+
+    Pass either `provider` (Phase 8 LLMProvider abstraction) or `client`
+    (legacy AnthropicClient mock). Mirrors `extract()`'s contract."""
+    if provider is None and client is None:
+        raise ExtractorError("extract_from_source() requires `provider` or `client`")
+
+    user_prompt = build_knowledge_user_prompt(
+        transcript=transcript,
+        source_title=source_title,
+        author=author,
+        topic=topic,
+        for_client=for_client,
+    )
+
+    if provider is not None:
+        try:
+            response = provider.chat(
+                ChatRequest(
+                    system=KNOWLEDGE_SYSTEM_PROMPT,
+                    user=user_prompt,
+                    model=model,
+                    max_tokens=max_tokens,
+                    enable_prompt_cache=True,
+                )
+            )
+        except ProviderError as exc:
+            raise ExtractorError(str(exc)) from exc
+        raw_text = response.text
+    else:
+        assert client is not None
+        resp = client.messages_create(
+            model=model,
+            system=KNOWLEDGE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+            max_tokens=max_tokens,
+        )
+        raw_text = _concat_text(resp)
+
+    payload = _parse_json_strict(raw_text)
+    return ExtractorResult.model_validate(payload)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Anthropic client wrapper
 # ────────────────────────────────────────────────────────────────────────────
 

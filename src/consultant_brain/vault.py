@@ -37,6 +37,7 @@ VAULT_SUBDIRS: tuple[str, ...] = (
     "06_Definitions",
     "07_People",
     "08_Reviews",
+    "09_Knowledge",  # Phase 9: source notes from videos / articles
     "_Indexes",
 )
 
@@ -73,6 +74,11 @@ class VaultLayout:
     @property
     def atoms_dir(self) -> Path:
         return self.root / "03_Atoms"
+
+    @property
+    def knowledge_dir(self) -> Path:
+        """Phase 9: source notes (one markdown per ingested video / article)."""
+        return self.root / "09_Knowledge"
 
     def atom_file(self, atom_id: str) -> Path:
         return self.atoms_dir / f"{atom_id}.md"
@@ -215,6 +221,11 @@ def _render_atom_markdown(atom: Atom) -> str:
         "client_org_id": str(atom.client_org_id) if atom.client_org_id else None,
         "call": f"[[{atom.call}]]",
         "call_type": atom.call_type.value,
+        # Phase 9: source provenance. Default `call` is dropped from
+        # frontmatter (None-filter below) so existing files don't churn.
+        "source_kind": atom.source_kind.value if atom.source_kind.value != "call" else None,
+        "source_url": atom.source_url,
+        "source_title": atom.source_title,
         "tags": list(atom.tags),
         "confidence": atom.confidence,
         "evidence_count": atom.evidence_count,
@@ -317,6 +328,73 @@ def write_call_note(layout: VaultLayout, note: CallNote) -> Path:
     layout.calls_dir.mkdir(parents=True, exist_ok=True)
     path = layout.call_file(note.id)
     _atomic_write(path, _render_call_note_markdown(note))
+    return path
+
+
+def write_knowledge_note(
+    layout: VaultLayout,
+    *,
+    source_id: str,
+    title: str,
+    kind: str,
+    url: str,
+    author: str | None,
+    duration_seconds: int | None,
+    published_at_iso: str | None,
+    fetched_at_iso: str,
+    language: str,
+    topic: str | None,
+    for_client: str | None,
+    summary: str,
+    atom_ids: list[str],
+    transcript: str,
+) -> Path:
+    """Phase 9: write the per-source note to `<vault>/09_Knowledge/<id>.md`.
+
+    Mirrors `write_call_note`'s shape but with source-specific
+    frontmatter + a Transcript section inside <details>. Idempotent —
+    re-running `learn` on the same URL overwrites in place.
+    """
+    layout.knowledge_dir.mkdir(parents=True, exist_ok=True)
+    fm: dict = {
+        "id": source_id,
+        "kind": "knowledge_source",
+        "source_kind": kind,
+        "title": title,
+        "url": url,
+        "author": author,
+        "duration_seconds": duration_seconds,
+        "published_at": published_at_iso,
+        "fetched_at": fetched_at_iso,
+        "language": language,
+        "topic": topic,
+        "for_client": f"[[{for_client}]]" if for_client else None,
+        "atom_count": len(atom_ids),
+    }
+    fm = {k: v for k, v in fm.items() if v is not None}
+    atom_links_section = (
+        "\n".join(f"- [[{atom_id}]]" for atom_id in atom_ids)
+        if atom_ids
+        else "_No atoms extracted from this source._"
+    )
+    body = f"""# {title}
+
+## Summary
+{summary}
+
+## Atoms
+{atom_links_section}
+
+## Transcript
+<details>
+<summary>Full transcript</summary>
+
+{transcript}
+
+</details>
+"""
+    path = layout.knowledge_dir / f"{source_id}.md"
+    _atomic_write(path, _dump_frontmatter(fm, body))
     return path
 
 

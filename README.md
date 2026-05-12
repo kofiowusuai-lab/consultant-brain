@@ -262,3 +262,65 @@ Tap any Memory atom in the overlay → POSTs `/suggestion_referenced` and the ro
 | 12 | `/metrics` + Brain Status window | Window renders live data, refreshes every 5s |
 | 13 | Multi-LLM providers | `--extractor-provider deepseek` succeeds; unit tests assert each provider's wire shape |
 | 14 | Brain health indicator | Dashboard dot turns green → yellow → red as deps fail; click opens Brain Status |
+
+## Phase 9 — learning from videos
+
+The brain isn't limited to your own calls anymore. Point it at a YouTube video or Instagram Reel and it absorbs the content into a separate knowledge layer.
+
+```bash
+# YouTube (uses captions API, free + fast)
+uv run consultant-brain learn --url 'https://youtu.be/HD2RU2QZxJk' --topic ai-sales
+
+# YouTube without captions (falls back to yt-dlp + Whisper, costs ~$0.006/min)
+uv run consultant-brain learn --url 'https://youtu.be/...' --whisper
+
+# Instagram Reel (Whisper required; --cookies-from-browser for private content)
+uv run consultant-brain learn --url 'https://instagram.com/reel/Cabc/' --whisper
+
+# Tie knowledge to one client so retrieval prefers it for that client's prep
+uv run consultant-brain learn --url 'https://youtu.be/...' --for-client Reece
+```
+
+### Why it stays out of Memory (by default)
+
+Each external atom is stamped `source_kind=youtube|instagram|...`. The retrieval pipeline knows the difference:
+
+- **Live calls** (the default): Hot + Warm layers filter on `source_kind=call`. A Hormozi rant about $1M ad budgets never blurs into Reece's real $10k objection. The Memory panel stays clean.
+- **Prep mode**: pass `?knowledge=3` to `/suggestions` (or call `retrieve(include_knowledge=True)`) and a new Knowledge layer fires alongside Warm, surfacing the best matches from `09_Knowledge/`.
+
+### What gets extracted
+
+External sources use a knowledge-tuned extractor (`extractor.extract_from_source`) with a system prompt that biases toward `insight`, `client_fact`, and `win_signal` atoms — not commitments or objections. Atoms get tagged with the source kind + your `--topic` flag, so a quick `consultant-brain query` filtered by tag returns just the things you learned from videos.
+
+### Where it lives on disk
+
+```
+~/ConsultantBrain/
+  09_Knowledge/
+    youtube_HD2RU2QZxJk.md          ← source note: title, summary, atom links, full transcript
+    instagram_Cabc1234.md
+  03_Atoms/
+    01HX...md  ← source_kind: youtube · source_url: https://youtu.be/... · source_title: ...
+```
+
+Each knowledge file is idempotent — re-running `learn` on the same URL overwrites in place (atom IDs are deterministic from the source ID + extractor version).
+
+### Transcription stack
+
+| Provider | What it does | Cost | When to use |
+|---|---|---|---|
+| `youtube-transcript-api` | Pulls auto + manual captions directly | Free | Default for YouTube |
+| `yt-dlp` (audio) + OpenAI Whisper | Downloads audio, transcribes via OpenAI's hosted Whisper-1 | ~$0.006/min | Videos without captions, all Instagram Reels |
+
+Whisper needs the OpenAI key in the same `secrets.json` (`openai-api-key`). Private Instagram content needs `--cookies-from-browser chrome` so yt-dlp can authenticate.
+
+### Service endpoint
+
+```bash
+curl -X POST http://127.0.0.1:8787/learn -H 'Content-Type: application/json' -d '{
+  "url": "https://youtu.be/HD2RU2QZxJk",
+  "topic": "ai-sales",
+  "for_client": "Reece",
+  "allow_whisper": false
+}'
+```

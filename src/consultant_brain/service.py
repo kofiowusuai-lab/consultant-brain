@@ -506,6 +506,7 @@ def _register_routes(app: FastAPI) -> None:
         hot: int = Query(1, ge=0, le=10),
         warm: int = Query(2, ge=0, le=10),
         cold: int = Query(1, ge=0, le=10),
+        knowledge: int = Query(0, ge=0, le=10),
     ) -> SuggestionsResponse:
         registry: LiveCallRegistry = request.app.state.registry
         vault: Path = request.app.state.vault_root
@@ -529,8 +530,9 @@ def _register_routes(app: FastAPI) -> None:
             client=state.client,
             call_type=state.call_type,
             vault_root=vault,
+            include_knowledge=knowledge > 0,
         )
-        panel = result.top_for_panel(hot=hot, warm=warm, cold=cold)
+        panel = result.top_for_panel(hot=hot, warm=warm, cold=cold, knowledge=knowledge)
         suggestions = [SuggestionDTO.from_ranked_hit(rh) for rh in panel]
         # Phase 7: log each emit so acceptance-rate can match against
         # POST /suggestion_referenced events later. Errors here never
@@ -552,6 +554,52 @@ def _register_routes(app: FastAPI) -> None:
             window_chars=len(window),
             generated_at=datetime.now(timezone.utc),
         )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Phase 9 — learn from external sources (YouTube / Instagram)
+    # ──────────────────────────────────────────────────────────────────
+
+    @app.post("/learn")
+    def learn_endpoint(body: dict, request: Request) -> dict:
+        """Ingest a YouTube or Instagram URL into the knowledge layer.
+
+        Body: { "url": "...", "topic": "ai-sales", "for_client": "Reece",
+                "allow_whisper": true, "cookies_from_browser": "chrome",
+                "extractor_provider": "anthropic" }
+        Only `url` is required.
+
+        Returns a summary payload. Fire-and-forget from the Swift app
+        is fine — the long-running fetch happens inline so the caller
+        can choose to poll or wait.
+        """
+        url = (body or {}).get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise HTTPException(status_code=400, detail="`url` is required")
+
+        from consultant_brain.learn import run_learn
+
+        vault: Path = request.app.state.vault_root
+        try:
+            result = run_learn(
+                url=url,
+                vault_root=vault,
+                topic=body.get("topic"),
+                for_client=body.get("for_client"),
+                allow_whisper=bool(body.get("allow_whisper", False)),
+                cookies_from_browser=body.get("cookies_from_browser"),
+                extractor_provider_name=body.get("extractor_provider"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        return {
+            "source_id": result.source_id,
+            "source_url": result.source_url,
+            "source_kind": result.source_kind.value,
+            "atom_count": result.atom_count,
+            "summary": result.summary,
+            "knowledge_note": str(result.knowledge_note_path) if result.knowledge_note_path else None,
+        }
 
     @app.post("/suggestion_referenced", response_model=SuggestionReferencedResponse)
     def suggestion_referenced(
