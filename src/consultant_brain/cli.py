@@ -249,6 +249,54 @@ def score(
 
 
 @app.command()
+def distill(
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    skip_context: bool = typer.Option(
+        False,
+        "--skip-context",
+        help="Skip the context.md regeneration pass (run pattern mining only).",
+    ),
+    skip_patterns: bool = typer.Option(
+        False,
+        "--skip-patterns",
+        help="Skip the pattern miner (regenerate context.md only).",
+    ),
+) -> None:
+    """Phase 6 distillation: mine patterns + regenerate context.md.
+
+    Pattern mining: walks 03_Atoms/, finds (type, primary_tag) clusters
+    observed ≥3× across distinct calls, promotes each to a Pattern note
+    in 04_Patterns/.
+
+    Context regeneration: for every client folder under 01_Clients/,
+    rebuilds context.md from active atoms + recent call notes. Pinned
+    user notes inside `<!-- pin -->` blocks are preserved.
+    """
+    from consultant_brain.distillation.client_context import regenerate_all_clients
+    from consultant_brain.distillation.patterns import mine_patterns
+
+    if not skip_patterns:
+        pattern_result = mine_patterns(vault_root=vault)
+        typer.echo(
+            f"Patterns: wrote {pattern_result.patterns_written}, "
+            f"updated {pattern_result.patterns_updated}, "
+            f"skipped {pattern_result.candidates_skipped} below threshold."
+        )
+
+    if not skip_context:
+        context_results = regenerate_all_clients(vault_root=vault)
+        if context_results:
+            for r in context_results:
+                pinned_note = " (pinned preserved)" if r.preserved_pinned else ""
+                typer.echo(
+                    f"Context: {r.client_slug} · {r.atom_count} atoms · "
+                    f"{r.call_count} calls{pinned_note}"
+                )
+        else:
+            typer.echo("Context: no clients to regenerate.")
+
+
+@app.command()
 def retrain(
     vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
 ) -> None:

@@ -126,7 +126,7 @@ def retrieve(
         today=today,
     )
 
-    cold = _cold_layer(transcript_window=transcript_window)
+    cold = _cold_layer(vault_root=vault_root, transcript_window=transcript_window, today=today)
 
     return RetrievalResult(hot=hot, warm=warm, cold=cold)
 
@@ -217,13 +217,33 @@ def _dedupe_by_tag(ranked: list[RankedHit], *, per_bucket: int) -> list[RankedHi
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _cold_layer(*, transcript_window: str) -> list[RankedHit]:
-    """Pattern matching against `04_Patterns/`. Patterns are mined by the
-    Phase 6 distiller from repeated atoms; until that ships there are no
-    patterns to match against, so this layer is a documented stub.
+def _cold_layer(*, vault_root: Path, transcript_window: str, today: date) -> list[RankedHit]:
+    """Pattern matching against `04_Patterns/` populated by the Phase 6
+    distiller. Patterns whose primary_tag or example phrases echo in the
+    transcript window fire. Falls back to an empty list when (a) no
+    patterns exist yet, (b) the window is empty.
     """
-    _ = transcript_window  # explicit unused arg for clarity
-    return []
+    if not transcript_window.strip():
+        return []
+    # Lazy import — keeps retrieve.py importable without distillation deps.
+    from consultant_brain.distillation.cold_layer import (
+        find_matching_patterns,
+        pattern_hit_as_atom_hit,
+    )
+
+    hits = find_matching_patterns(vault_root=vault_root, window=transcript_window, top_n=COLD_LAYER_MAX)
+    out: list[RankedHit] = []
+    for hit in hits:
+        atom_hit = pattern_hit_as_atom_hit(hit)
+        out.append(
+            _rank_hit(
+                atom_hit,
+                layer="cold",
+                today=today,
+                reason=f"pattern fire: {hit.matched_phrase}",
+            )
+        )
+    return out
 
 
 # ────────────────────────────────────────────────────────────────────────────

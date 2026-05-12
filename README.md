@@ -82,6 +82,18 @@ uv run consultant-brain suggest \
 
 Returns the panel slice the live copilot would show: 1 hot + 2 warm + 1 cold atom by default. `--explain` prints rank components (similarity / recency / confidence / final score).
 
+### Distillation (Phase 6)
+
+```bash
+uv run consultant-brain distill --vault ~/ConsultantBrain
+```
+
+Two passes:
+- **Pattern mining:** any (atom_type, primary_tag) cluster observed across ≥3 distinct calls gets promoted to `04_Patterns/<type>__<tag>.md` with frontmatter (observation_count, member_atom_ids, score_impact_proxy). Re-runs are idempotent — updates an existing pattern in place, preserving `created_at`.
+- **`context.md` auto-regeneration:** every client folder's `context.md` gets rebuilt from active atoms grouped by type + the 5 most recent call summaries. The `<!-- pin --> ... <!-- /pin -->` block preserves user-edited notes across regenerations.
+
+Once patterns exist, the **cold retrieval layer fires automatically** during live calls — `consultant-brain suggest` returns matched patterns alongside hot+warm atoms. The Swift overlay's `Memory` panel shows them in purple (`COLD` tag).
+
 ### Post-call scoring + override (Phase 5)
 
 ```bash
@@ -137,4 +149,4 @@ uv run pytest
 
 ## Out of scope this phase
 
-Swift app score-override UI · pattern distillation · context.md auto-regen · stakeholder graph · weekly reviews · CRM linking. Each gets its own plan when we ship it.
+Stakeholder graph (07_People) · weekly reviews (08_Reviews) · CRM linking (atom client field → CRMOrganization UUID) · metrics dashboard / self-evaluation (Phase 7). Each gets its own plan when we ship it.
