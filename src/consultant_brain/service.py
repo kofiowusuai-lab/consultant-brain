@@ -35,12 +35,14 @@ from fastapi import (
 from pydantic import BaseModel, Field
 
 from consultant_brain.briefs import (
+    ChatProcessResult,
     ChatTurn as _ChatTurn,
     ClientBrief,
     ClientBriefAnswer,
     ask_about_client as _ask_about_client,
     generate_client_brief as _generate_client_brief,
     load_cached_brief as _load_cached_brief,
+    process_chat as _process_chat,
 )
 from consultant_brain.context_dumps import (
     ContextDumpPreview,
@@ -832,21 +834,37 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.post("/client_brief/ask")
     def client_brief_ask_endpoint(body: dict, request: Request) -> dict:
-        """Answer one follow-up question about a client.
+        """One unified chat round. The LLM classifies intent:
+
+          - "question" → answer is the model's response. Brief stays
+                         where it is.
+          - "note"     → the model also structures the user's text into
+                         atoms, the brain writes them to the vault,
+                         regenerates the brief, and returns the
+                         updated brief inline so the dashboard can
+                         animate the cards to the new state.
 
         Body shape:
           {
             "client_name": "Reece",
-            "question": "What was the deadline he mentioned?",
+            "question": "...",         // user input (statement or question)
             "history": [
               { "role": "user", "content": "..." },
               { "role": "assistant", "content": "..." }
             ]
           }
 
-        The history field is optional. The brain caps it at 6 most-
-        recent turns server-side so long threads don't blow the
-        prompt budget.
+        Response shape (intent gates which optional fields are set):
+          {
+            "intent": "question" | "note",
+            "answer": "...",
+            "atoms_consulted": 23,
+            "calls_consulted": 1,
+            "dumps_consulted": 4,
+            "model_used": "claude-opus-4-7",
+            "ingested_atoms": 0,                   // > 0 only on notes
+            "updated_brief": { ... ClientBrief ... } or null
+          }
         """
         client_name = (body or {}).get("client_name") or (body or {}).get("client")
         question = (body or {}).get("question")
@@ -890,9 +908,9 @@ def _register_routes(app: FastAPI) -> None:
 
         vault: Path = request.app.state.vault_root
         try:
-            answer: ClientBriefAnswer = _ask_about_client(
+            result: ChatProcessResult = _process_chat(
                 client_name=client_name.strip(),
-                question=question.strip(),
+                user_input=question.strip(),
                 history=history,
                 vault_root=vault,
                 provider=provider,
@@ -902,11 +920,18 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         return {
-            "answer": answer.answer,
-            "atoms_consulted": answer.atoms_consulted,
-            "calls_consulted": answer.calls_consulted,
-            "dumps_consulted": answer.dumps_consulted,
-            "model_used": answer.model_used,
+            "intent": result.intent,
+            "answer": result.answer,
+            "atoms_consulted": result.atoms_consulted,
+            "calls_consulted": result.calls_consulted,
+            "dumps_consulted": result.dumps_consulted,
+            "model_used": result.model_used,
+            "ingested_atoms": result.ingested_atoms,
+            "updated_brief": (
+                result.updated_brief.to_dict()
+                if result.updated_brief is not None
+                else None
+            ),
         }
 
     # ──────────────────────────────────────────────────────────────────

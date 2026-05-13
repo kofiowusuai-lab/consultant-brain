@@ -18,20 +18,32 @@ from consultant_brain.briefs.generator import (
     generate_client_brief,
     load_cached_brief,
 )
+from consultant_brain.briefs.notes import (
+    IngestedNoteResult,
+    StructuredNoteFact,
+    ingest_chat_note,
+)
 from consultant_brain.briefs.qa import (
+    ChatProcessResult,
     ChatTurn,
     ClientBriefAnswer,
     ask_about_client,
+    process_chat,
 )
 
 __all__ = [
+    "ChatProcessResult",
     "ChatTurn",
     "ClientBrief",
     "ClientBriefAnswer",
     "ClientBriefCommitment",
     "ClientBriefMeta",
     "ClientBriefObjection",
+    "IngestedNoteResult",
+    "StructuredNoteFact",
     "ask_about_client",
     "generate_client_brief",
+    "ingest_chat_note",
     "load_cached_brief",
+    "process_chat",
 ]
