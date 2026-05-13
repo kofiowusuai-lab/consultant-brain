@@ -34,13 +34,26 @@ from typing import Literal
 
 SUGGESTION_LOG_FILENAME = "suggestion_log.jsonl"
 
-# Phase 11: feedback events the user explicitly produces. Kept as a tuple
-# so /suggestion_feedback can validate input against the canonical list.
+# Phase 11+12: feedback events the user explicitly produces. Kept as a
+# tuple so /suggestion_feedback can validate input against the canonical
+# list.
+#
+# Phase 11 introduced helpful / useless / dismissed / used_in_call.
+# Phase 12 added the exposure funnel: shown / hidden / expanded /
+# copied / followup_created. With these the brain can compute a
+# complete funnel ratio (shown → expanded → copied → followup) instead
+# of just the post-tap signals.
 FEEDBACK_KINDS: tuple[str, ...] = (
     "helpful",
     "useless",
     "dismissed",
     "used_in_call",
+    # Phase 12 exposure events
+    "shown",
+    "hidden",
+    "expanded",
+    "copied",
+    "followup_created",
 )
 
 

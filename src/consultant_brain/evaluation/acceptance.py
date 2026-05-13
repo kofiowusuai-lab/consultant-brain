@@ -35,6 +35,14 @@ class AcceptanceReport:
     plus a stronger acceptance signal (`used_in_call`) than the legacy
     60-90s `referenced` proxy. Rates are computed against `total_emits`
     so all four are directly comparable to `acceptance_rate`.
+
+    Phase 12 adds the exposure funnel: shown → expanded → copied →
+    followup_created. Each rate's denominator is the prior stage so
+    "expand_rate" reads as "of atoms the user saw, how many did they
+    open?" rather than diluting against emits the user never scrolled
+    to.  `hidden` is tracked but not surfaced as a rate — it's noise
+    in the funnel sense, useful only as a sanity check that shown ≈
+    hidden over time.
     """
 
     total_emits: int
@@ -52,6 +60,18 @@ class AcceptanceReport:
     useless_rate: float = 0.0
     dismissed_rate: float = 0.0
     used_rate: float = 0.0
+    # Phase 12 exposure-funnel counts. `shown_count` is bounded by
+    # `total_emits`; the rest are denominated against the prior stage
+    # so the rates compose into a funnel ratio at a glance.
+    shown_count: int = 0
+    hidden_count: int = 0
+    expanded_count: int = 0
+    copied_count: int = 0
+    followup_count: int = 0
+    shown_rate: float = 0.0  # shown / total_emits
+    expand_rate: float = 0.0  # expanded / shown
+    copy_rate: float = 0.0  # copied / shown
+    followup_rate: float = 0.0  # followup_created / shown
     by_layer: dict[str, float] = field(default_factory=dict)  # layer → rate
     by_layer_counts: dict[str, tuple[int, int]] = field(default_factory=dict)
     # ↑ layer → (referenced_count, emit_count)
@@ -78,13 +98,18 @@ def compute_acceptance(
     layer_emit_counts: dict[str, int] = defaultdict(int)
     layer_accept_counts: dict[str, int] = defaultdict(int)
 
-    # Phase 11: explicit feedback counts. Each pair contributes at most
-    # one per kind so a user double-tapping thumbs-up doesn't inflate
-    # the rate.
+    # Phase 11+12: per-kind pair sets. A pair contributes at most one
+    # event of each kind so a user double-tapping thumbs-up (or a row
+    # rerendering many times) doesn't inflate the rate.
     helpful_pairs: set[tuple[str, str]] = set()
     useless_pairs: set[tuple[str, str]] = set()
     dismissed_pairs: set[tuple[str, str]] = set()
     used_pairs: set[tuple[str, str]] = set()
+    shown_pairs: set[tuple[str, str]] = set()
+    hidden_pairs: set[tuple[str, str]] = set()
+    expanded_pairs: set[tuple[str, str]] = set()
+    copied_pairs: set[tuple[str, str]] = set()
+    followup_pairs: set[tuple[str, str]] = set()
 
     for pair_key, events_for_pair in by_pair.items():
         # Sort chronologically.
@@ -102,6 +127,16 @@ def compute_acceptance(
                     dismissed_pairs.add(pair_key)
                 elif e.kind == "used_in_call":
                     used_pairs.add(pair_key)
+                elif e.kind == "shown":
+                    shown_pairs.add(pair_key)
+                elif e.kind == "hidden":
+                    hidden_pairs.add(pair_key)
+                elif e.kind == "expanded":
+                    expanded_pairs.add(pair_key)
+                elif e.kind == "copied":
+                    copied_pairs.add(pair_key)
+                elif e.kind == "followup_created":
+                    followup_pairs.add(pair_key)
         # Iterate emits; for each, look for a referenced event within
         # window_seconds AFTER it.
         for i, event in enumerate(sorted_events):
@@ -138,7 +173,16 @@ def compute_acceptance(
     useless_count = len(useless_pairs)
     dismissed_count = len(dismissed_pairs)
     used_count = len(used_pairs)
+    shown_count = len(shown_pairs)
+    hidden_count = len(hidden_pairs)
+    expanded_count = len(expanded_pairs)
+    copied_count = len(copied_pairs)
+    followup_count = len(followup_pairs)
     denom = float(total_emits) if total_emits else 0.0
+    # Phase 12 funnel denominators: `shown` rates against emits (how
+    # often did the user actually see what we surfaced), then each
+    # downstream stage rates against shown so the funnel composes.
+    shown_denom = float(shown_count) if shown_count else 0.0
 
     return AcceptanceReport(
         total_emits=total_emits,
@@ -152,6 +196,15 @@ def compute_acceptance(
         useless_rate=(useless_count / denom) if denom else 0.0,
         dismissed_rate=(dismissed_count / denom) if denom else 0.0,
         used_rate=(used_count / denom) if denom else 0.0,
+        shown_count=shown_count,
+        hidden_count=hidden_count,
+        expanded_count=expanded_count,
+        copied_count=copied_count,
+        followup_count=followup_count,
+        shown_rate=(shown_count / denom) if denom else 0.0,
+        expand_rate=(expanded_count / shown_denom) if shown_denom else 0.0,
+        copy_rate=(copied_count / shown_denom) if shown_denom else 0.0,
+        followup_rate=(followup_count / shown_denom) if shown_denom else 0.0,
         by_layer=by_layer,
         by_layer_counts=by_layer_counts,
     )

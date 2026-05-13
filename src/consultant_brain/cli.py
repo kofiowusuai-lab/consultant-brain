@@ -14,6 +14,7 @@ each subcommand body delegates to a dedicated module.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -374,6 +375,79 @@ def reindex(
 
     summary = run_reindex(vault_root=vault, force=force)
     typer.echo(summary.summary_line())
+
+
+@app.command()
+def replay(
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    call_id: Optional[str] = typer.Option(
+        None,
+        "--call",
+        help="Call note id (filename stem under 02_Calls/).",
+    ),
+    call_file: Optional[Path] = typer.Option(
+        None,
+        "--call-file",
+        help="Ad-hoc markdown file outside the vault (overrides --call).",
+    ),
+    out: Optional[Path] = typer.Option(
+        None,
+        "--out",
+        help="Write markdown to this file. Defaults to stdout.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit JSON instead of markdown.",
+    ),
+    top_n: int = typer.Option(
+        4,
+        "--top-n",
+        help="Max atoms to compare per turn (default 4: 1 hot + 2 warm + 1 cold).",
+    ),
+) -> None:
+    """Phase 12: walk a saved call's transcript turn-by-turn, call the
+    current retrieval pipeline at each step, diff against the
+    historical /suggestions emits from suggestion_log.jsonl.
+
+    Use cases:
+      - Iterate on retrieval scoring (RECENCY_WEIGHT, etc.) and
+        confirm the diff narrows on a known-good call.
+      - Reproduce a user complaint by replaying the call they
+        flagged ("you missed X at turn 4").
+      - Validate that adding a new atom doesn't break existing
+        retrieval — re-run replay over the corpus, look for
+        `only_then` regressions.
+    """
+    from consultant_brain.evaluation.replay import (
+        ReplayError,
+        render_report_json,
+        render_report_markdown,
+        replay_call,
+    )
+
+    if call_id is None and call_file is None:
+        raise typer.BadParameter("Provide --call <id> or --call-file <path>.")
+    if call_id is not None and call_file is not None:
+        raise typer.BadParameter("Provide exactly one of --call / --call-file.")
+
+    try:
+        report = replay_call(
+            vault_root=vault,
+            call_id=call_id,
+            call_file=call_file,
+            top_n_per_turn=top_n,
+        )
+    except ReplayError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    rendered = render_report_json(report) if json_output else render_report_markdown(report)
+    if out is None:
+        typer.echo(rendered)
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(rendered + "\n", encoding="utf-8")
+        typer.echo(f"Replay report written to {out}")
 
 
 @app.command(name="reconcile-org-ids")

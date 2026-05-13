@@ -113,6 +113,16 @@ def _acceptance_to_dict(a: AcceptanceReport | None) -> dict | None:
         "useless_rate": a.useless_rate,
         "dismissed_rate": a.dismissed_rate,
         "used_rate": a.used_rate,
+        # Phase 12: exposure-funnel counts + rates.
+        "shown_count": a.shown_count,
+        "hidden_count": a.hidden_count,
+        "expanded_count": a.expanded_count,
+        "copied_count": a.copied_count,
+        "followup_count": a.followup_count,
+        "shown_rate": a.shown_rate,
+        "expand_rate": a.expand_rate,
+        "copy_rate": a.copy_rate,
+        "followup_rate": a.followup_rate,
         "by_layer": a.by_layer,
         "by_layer_counts": {k: list(v) for k, v in a.by_layer_counts.items()},
     }
@@ -181,6 +191,18 @@ def render_report_text(report: MetricsReport) -> str:
                 f"👎 {a.useless_rate*100:4.1f}%  "
                 f"✕ dismissed {a.dismissed_rate*100:4.1f}%  "
                 f"✓ used {a.used_rate*100:4.1f}%"
+            )
+        # Phase 12: exposure-funnel breakdown rendered when any
+        # exposure event has actually been logged.  The funnel only
+        # makes sense end-to-end so we gate on the entry stage
+        # (shown_count > 0) rather than emitting partial rows.
+        if a.shown_count:
+            lines.append(
+                f"  Funnel                "
+                f"shown {a.shown_rate*100:4.1f}% of emits · "
+                f"expand {a.expand_rate*100:4.1f}% · "
+                f"copy {a.copy_rate*100:4.1f}% · "
+                f"followup {a.followup_rate*100:4.1f}%"
             )
 
     if report.score_mae is None:
