@@ -16,6 +16,7 @@ every 15s anyway, and the retrieval pipeline is sub-second).
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -51,6 +52,10 @@ from consultant_brain.context_dumps import (
     run_preview as _run_dump_preview,
 )
 from consultant_brain.mcp_server import build_mcp_starlette_app
+from consultant_brain.mcp_server.server import (
+    TOOLS as _MCP_TOOLS,
+    _dispatch as _mcp_dispatch,
+)
 from consultant_brain.crm.resolver import CRMResolver
 from consultant_brain.live_call_finalizer import finalize_live_call
 from consultant_brain.live_loop import maybe_run_moment_detection
@@ -280,7 +285,60 @@ def create_app(*, vault_root: Path | None = None, registry: LiveCallRegistry | N
     # CONSULTANT_BRAIN_MCP_API_KEY env var.
     app.mount("/mcp", build_mcp_starlette_app(vault_root=resolved_vault))
 
+    _register_tool_dispatcher(app)
+
     return app
+
+
+def _register_tool_dispatcher(app: FastAPI) -> None:
+    """Plain HTTP wrapper around the MCP tool dispatcher. Agents that
+    don't speak MCP (the Hermes plugin runtime, raw curl, a shell
+    one-liner) can POST to /tool/<name> with a JSON body and get the
+    same structured response the MCP transport returns.
+
+    Single endpoint covers every tool — adding a new MCP tool
+    automatically exposes it here too with zero extra wiring.
+    """
+
+    @app.get("/tool")
+    def list_tools_endpoint() -> list[dict]:
+        """Enumerate every available tool with its name, description,
+        and input schema. Use this from the Hermes plugin's check_fn
+        to verify the brain has the expected surface."""
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.inputSchema,
+            }
+            for tool in _MCP_TOOLS
+        ]
+
+    @app.post("/tool/{name}")
+    async def call_tool_endpoint(name: str, request: Request):
+        """Run one brain tool by name. Body is the tool's arguments
+        object — {} when the tool takes no args. Response is whatever
+        the tool returned, parsed as JSON (could be a list, dict, or
+        wrapped text — FastAPI infers the shape per-call)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        state = {"vault_root": request.app.state.vault_root}
+        try:
+            result_text = await _mcp_dispatch(name, body, state)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        if result_text.startswith("Unknown tool:"):
+            raise HTTPException(status_code=404, detail=result_text)
+
+        try:
+            return json.loads(result_text)
+        except json.JSONDecodeError:
+            return {"text": result_text}
 
 
 def _preview_to_dto(preview: ContextDumpPreview) -> dict:
