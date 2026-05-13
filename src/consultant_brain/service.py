@@ -34,6 +34,11 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
+from consultant_brain.briefs import (
+    ClientBrief,
+    generate_client_brief as _generate_client_brief,
+    load_cached_brief as _load_cached_brief,
+)
 from consultant_brain.context_dumps import (
     ContextDumpPreview,
     ContextDumpPreviewStore,
@@ -761,6 +766,66 @@ def _register_routes(app: FastAPI) -> None:
         store = request.app.state.context_dump_previews
         dropped = store.discard(preview_id)
         return {"preview_id": preview_id, "discarded": dropped}
+
+    # ──────────────────────────────────────────────────────────────────
+    # Per-client AI brief — structured summary the dashboard renders
+    # under each client's Context section. Reads atoms + call notes +
+    # context dumps for one client, sends to the configured LLM,
+    # returns named sections (summary / key_facts / open_commitments /
+    # open_objections / recent_moves / next_steps / meeting_prep).
+    # ──────────────────────────────────────────────────────────────────
+
+    @app.get("/client_brief")
+    def client_brief_endpoint(
+        request: Request,
+        client: str = Query(..., min_length=1),
+        refresh: bool = Query(default=False),
+    ) -> dict:
+        """Return a per-client brief. When `refresh=true` OR no cached
+        brief exists, run the LLM. Otherwise return the cached version
+        (instant). The Swift UI sets `refresh=true` from the refresh
+        button + on first open of a client whose atom count has
+        changed since the cached brief.
+        """
+        vault: Path = request.app.state.vault_root
+
+        # Cache hit on default open — keeps the dashboard snappy.
+        if not refresh:
+            cached = _load_cached_brief(client_name=client, vault_root=vault)
+            if cached is not None:
+                return cached.to_dict()
+
+        # Cache miss or explicit refresh — build a new brief.
+        provider = None
+        try:
+            provider = _get_extractor_provider(request.app)
+        except Exception:
+            provider = None
+
+        legacy_client = None
+        if provider is None:
+            from consultant_brain.extractor import real_anthropic_client
+            from consultant_brain.secrets import (
+                SecretNotFoundError,
+                get_anthropic_key,
+            )
+
+            try:
+                legacy_client = real_anthropic_client(get_anthropic_key())
+            except SecretNotFoundError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        try:
+            brief = _generate_client_brief(
+                client_name=client,
+                vault_root=vault,
+                provider=provider,
+                client=legacy_client,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        return brief.to_dict()
 
     # ──────────────────────────────────────────────────────────────────
     # Phase 9 — learn from external sources (YouTube / Instagram)
