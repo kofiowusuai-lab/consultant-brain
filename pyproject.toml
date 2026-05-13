@@ -24,6 +24,7 @@ dependencies = [
     "pypdf>=6.11.0",
     "python-docx>=1.2.0",
     "python-multipart>=0.0.28",
+    "mcp>=1.27.1",
 ]
 
 [project.scripts]

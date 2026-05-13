@@ -50,6 +50,7 @@ from consultant_brain.context_dumps import (
     commit_preview as _commit_dump_preview,
     run_preview as _run_dump_preview,
 )
+from consultant_brain.mcp_server import build_mcp_starlette_app
 from consultant_brain.crm.resolver import CRMResolver
 from consultant_brain.live_call_finalizer import finalize_live_call
 from consultant_brain.live_loop import maybe_run_moment_detection
@@ -271,6 +272,14 @@ def create_app(*, vault_root: Path | None = None, registry: LiveCallRegistry | N
     app.state.context_dump_previews = ContextDumpPreviewStore(ttl_seconds=_ttl)
 
     _register_routes(app)
+
+    # Mount the MCP server as a sub-app so any MCP-compatible agent
+    # (Hermes, Claude Desktop, Cursor, Claude API SDKs) can attach
+    # remotely and call brain tools. Same process, same port — one
+    # cloudflared tunnel exposes everything. Auth is opt-in via the
+    # CONSULTANT_BRAIN_MCP_API_KEY env var.
+    app.mount("/mcp", build_mcp_starlette_app(vault_root=resolved_vault))
+
     return app
 
 

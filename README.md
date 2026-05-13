@@ -388,3 +388,79 @@ curl -X DELETE http://127.0.0.1:8787/context_dump/01HX...
 ```
 
 Previews live in memory keyed by ULID and evict after 30 minutes (`CONSULTANT_BRAIN_CONTEXT_DUMP_TTL_SECONDS` to override).
+
+## Harness — MCP server for remote agents
+
+The brain ships an embedded MCP (Model Context Protocol) server so any MCP-aware client — Hermes, Claude Desktop, Cursor, the OpenAI Agents SDK, your own scripts — can attach and gain tool-call access to every brain capability. Same process, same port as the dashboard service; no extra daemon to run.
+
+### Tools exposed
+
+| Tool | What it does |
+|---|---|
+| `list_clients` | Every client with atom / call / dump counts |
+| `get_client_brief` | Cached AI brief (~50ms) |
+| `refresh_client_brief` | Force a fresh LLM brief (10-30s) |
+| `ask_client` | Q&A or note ingest on a client; note path writes atoms + refreshes the brief |
+| `note_about_client` | Explicit note path — record a fact, get the updated brief inline |
+| `search_vault` | Semantic LanceDB search over every atom; optional client filter |
+| `get_atom` | Fetch one atom by 26-char ID |
+| `list_recent_calls` | Recent call notes (date, client, summary) |
+| `get_call` | Full call note + transcript |
+| `list_context_dumps` | Off-call dumps for one client |
+| `list_patterns` / `list_plays` | Promoted patterns + cross-client plays |
+| `vault_diagnostics` | Vault / LanceDB / Ollama / LLM-key health |
+
+### Local connection (loopback)
+
+The brain's MCP endpoints mount at `/mcp/sse` (event stream) + `/mcp/messages/...` (tool-call POST). For Hermes running on the same machine:
+
+```python
+# In Hermes' agent config
+from mcp.client.sse import sse_client
+from mcp.client.session import ClientSession
+
+async with sse_client("http://127.0.0.1:8787/mcp/sse") as (read, write):
+    async with ClientSession(read, write) as session:
+        await session.initialize()
+        tools = await session.list_tools()
+        result = await session.call_tool(
+            "get_client_brief",
+            {"client": "Reece"},
+        )
+```
+
+### Remote connection (cloudflared)
+
+Expose the brain publicly via Cloudflare Tunnel — same pattern as the rest of OpenClaw infra:
+
+```bash
+# One-time: set the bearer token
+echo "export CONSULTANT_BRAIN_MCP_API_KEY=$(openssl rand -hex 32)" >> ~/.zshrc
+source ~/.zshrc
+
+# Restart the brain so it picks up the token
+pkill -f 'consultant-brain serve'
+nohup ~/code/consultant-brain/.venv/bin/consultant-brain serve > /tmp/consultant-brain.out 2>&1 &
+
+# Spin up the tunnel
+cloudflared tunnel --url http://127.0.0.1:8787
+```
+
+Tunnel prints a public URL like `https://random-words.trycloudflare.com`. Point Hermes at `https://random-words.trycloudflare.com/mcp/sse` with the bearer token in the `Authorization` header.
+
+### Auth
+
+`CONSULTANT_BRAIN_MCP_API_KEY` controls bearer auth. **Unset** = no auth (intentional for loopback-only). **Set** = every `/mcp/*` request must carry `Authorization: Bearer <key>` or gets `401`. Always set the key before exposing via cloudflared.
+
+### Quick test from the command line
+
+```bash
+# Local, no auth
+curl -N http://127.0.0.1:8787/mcp/sse
+
+# Remote with bearer token
+curl -N -H "Authorization: Bearer $CONSULTANT_BRAIN_MCP_API_KEY" \
+  https://your-tunnel.trycloudflare.com/mcp/sse
+```
+
+The SSE stream stays open and emits MCP protocol messages once an agent initializes the session. Use the Python MCP client (above) for actual tool calls — raw curl is just a liveness check.
