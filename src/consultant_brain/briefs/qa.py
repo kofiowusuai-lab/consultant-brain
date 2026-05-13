@@ -210,6 +210,7 @@ def process_chat(
     client: Optional[AnthropicClient] = None,
     model: str = DEFAULT_EXTRACTOR_MODEL,
     today: Optional[datetime] = None,
+    crm_resolver=None,  # forwarded to ingest_chat_note on note path
 ) -> ChatProcessResult:
     """One round of the unified chat: the LLM classifies + responds.
 
@@ -293,6 +294,7 @@ def process_chat(
         raw_text=user_input,
         facts=facts,
         vault_root=vault_root,
+        crm_resolver=crm_resolver,
     )
 
     # Regenerate the brief synchronously so the response carries the

@@ -76,6 +76,11 @@ class ContextDumpPreview:
     atoms: tuple[ExtractedAtom, ...]
     notes: Optional[str]
     warnings: tuple[str, ...]
+    # Phase 11: Swift caller can pass the canonical CRM UUID at upload
+    # time so commit doesn't have to re-resolve the display name.
+    # Empty when the caller doesn't know it — commit falls back to the
+    # CRMResolver in that case.
+    client_org_id: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +105,7 @@ def run_preview(
     client=None,
     extractor_model: str = DEFAULT_EXTRACTOR_MODEL,
     today: Optional[date] = None,
+    client_org_id: Optional[str] = None,
 ) -> ContextDumpPreview:
     """Parse the file, run the context-dump extractor, return a
     preview — vault is NOT touched.
@@ -153,6 +159,7 @@ def run_preview(
         atoms=tuple(atoms),
         notes=notes,
         warnings=tuple(parsed.warnings),
+        client_org_id=client_org_id or None,
     )
 
 
@@ -161,12 +168,18 @@ def commit_preview(
     preview: ContextDumpPreview,
     vault_root: Path,
     accepted_atom_indexes: Optional[list[int]] = None,
+    crm_resolver=None,  # CRMResolver — typed loose to dodge the import cycle
 ) -> ContextDumpCommitResult:
     """Materialize the preview's atoms + dump note into the vault.
 
     `accepted_atom_indexes` defaults to every atom; pass a subset
     (e.g. `[0, 2, 4]`) to drop the others before commit. The dropped
     atoms never touch disk.
+
+    Phase 11: `crm_resolver` resolves the preview's client_name to a
+    CRM organization UUID. Every committed atom carries it as
+    `client_org_id`. Falls through to None when the resolver isn't
+    supplied or the client isn't in the CRM.
     """
     layout = VaultLayout.for_root(vault_root)
     ensure_vault_skeleton(layout)
@@ -185,6 +198,26 @@ def commit_preview(
         if 0 <= i < len(preview.atoms)
     ]
 
+    # Phase 11: resolve UUID once for the whole commit so every atom
+    # carries the same client_org_id. Priority order:
+    #   1. UUID the Swift caller passed at upload time (it had the
+    #      CRM open and is the authoritative source).
+    #   2. CRMResolver against the preview's display name.
+    #   3. None — atom is minted with the name only; reconcile-org-ids
+    #      backfills later when the org enters the CRM.
+    org_uuid = None
+    if preview.client_org_id:
+        try:
+            from uuid import UUID as _UUID
+            org_uuid = _UUID(preview.client_org_id)
+        except (ValueError, AttributeError):
+            org_uuid = None
+    if org_uuid is None and crm_resolver is not None and preview.client_name:
+        try:
+            org_uuid = crm_resolver.resolve_uuid(preview.client_name)
+        except Exception:
+            org_uuid = None
+
     atoms: list[Atom] = []
     for index, extracted in enumerate(kept_extracted):
         atom_id = derive_atom_id(
@@ -197,7 +230,7 @@ def commit_preview(
                 id=atom_id,
                 type=extracted.type,
                 client=preview.client_name,
-                client_org_id=None,
+                client_org_id=org_uuid,
                 call=preview.preview_id,
                 call_type=CallType.consulting_call,  # closest analog; not a real call
                 source_kind=SourceKind.context_dump,

@@ -103,6 +103,16 @@ def _acceptance_to_dict(a: AcceptanceReport | None) -> dict | None:
         "total_emits": a.total_emits,
         "total_referenced": a.total_referenced,
         "acceptance_rate": a.acceptance_rate,
+        # Phase 11: explicit-feedback breakdown. Counts + rates rendered
+        # alongside acceptance_rate on the Brain Status window.
+        "helpful_count": a.helpful_count,
+        "useless_count": a.useless_count,
+        "dismissed_count": a.dismissed_count,
+        "used_count": a.used_count,
+        "helpful_rate": a.helpful_rate,
+        "useless_rate": a.useless_rate,
+        "dismissed_rate": a.dismissed_rate,
+        "used_rate": a.used_rate,
         "by_layer": a.by_layer,
         "by_layer_counts": {k: list(v) for k, v in a.by_layer_counts.items()},
     }
@@ -161,6 +171,17 @@ def render_report_text(report: MetricsReport) -> str:
         for layer, rate in sorted(a.by_layer.items()):
             accepts, emits = a.by_layer_counts.get(layer, (0, 0))
             lines.append(f"  · {layer:<5} {rate*100:5.1f}%  ({accepts}/{emits})")
+        # Phase 11: explicit-feedback breakdown rendered when any user
+        # feedback has actually been logged. Stays silent on a fresh
+        # vault so the dashboard doesn't show four zero rows.
+        if a.helpful_count or a.useless_count or a.dismissed_count or a.used_count:
+            lines.append(
+                f"  Feedback              "
+                f"👍 {a.helpful_rate*100:4.1f}%  "
+                f"👎 {a.useless_rate*100:4.1f}%  "
+                f"✕ dismissed {a.dismissed_rate*100:4.1f}%  "
+                f"✓ used {a.used_rate*100:4.1f}%"
+            )
 
     if report.score_mae is None:
         lines.append("Score prediction MAE     — (no score corrections logged yet)")

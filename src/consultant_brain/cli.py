@@ -376,6 +376,26 @@ def reindex(
     typer.echo(summary.summary_line())
 
 
+@app.command(name="reconcile-org-ids")
+def reconcile_org_ids(
+    vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report what would change without writing to disk or the index.",
+    ),
+) -> None:
+    """Phase 11: backfill `client_org_id` on atoms minted before the CRM
+    UUID became a first-class field. Re-running after a successful pass
+    is a no-op (idempotent). Atoms whose `client` display name isn't in
+    the CRM are reported as skipped, not failed — add the org and re-run.
+    """
+    from consultant_brain.reconcile import run_reconcile_org_ids
+
+    summary = run_reconcile_org_ids(vault_root=vault, dry_run=dry_run)
+    typer.echo(summary.summary_line())
+
+
 @app.command()
 def metrics(
     vault: Path = typer.Option(DEFAULT_VAULT, "--vault", "-v", help="Vault root."),

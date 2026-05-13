@@ -73,7 +73,9 @@ from consultant_brain.scoring.loader import CallNotFoundError, load_call_for_sco
 from consultant_brain.scoring.score import compute_score
 from consultant_brain.scoring.weights import ScoringWeightsTable
 from consultant_brain.evaluation.suggestion_log import (
+    FEEDBACK_KINDS,
     log_emit as _log_suggestion_emit,
+    log_feedback as _log_suggestion_feedback,
     log_referenced as _log_suggestion_referenced,
 )
 
@@ -220,6 +222,23 @@ class SuggestionReferencedRequest(BaseModel):
 class SuggestionReferencedResponse(BaseModel):
     call_id: str
     atom_id: str
+    logged: bool
+
+
+class SuggestionFeedbackRequest(BaseModel):
+    """Phase 11: Swift posts here from the overlay's thumbs UI. `kind`
+    is constrained to the FEEDBACK_KINDS tuple at the endpoint so
+    unknown kinds return a clean 400."""
+
+    call_id: str = Field(min_length=1)
+    atom_id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+
+
+class SuggestionFeedbackResponse(BaseModel):
+    call_id: str
+    atom_id: str
+    kind: str
     logged: bool
 
 
@@ -655,9 +674,23 @@ def _register_routes(app: FastAPI) -> None:
                 generated_at=datetime.now(timezone.utc),
             )
 
+        # Phase 11: resolve the live call's client name into a CRM UUID
+        # so retrieve() can prefer UUID-pinned atoms over name-pinned
+        # ones. Falls back to None when the client isn't in the CRM yet;
+        # retrieve() degrades gracefully to name matching.
+        org_uuid = None
+        resolver = getattr(request.app.state, "crm_resolver", None)
+        if resolver is not None and state.client:
+            try:
+                resolved = resolver.resolve_uuid(state.client)
+                org_uuid = str(resolved) if resolved else None
+            except Exception:
+                org_uuid = None
+
         result = retrieve(
             transcript_window=window,
             client=state.client,
+            client_org_id=org_uuid,
             call_type=state.call_type,
             vault_root=vault,
             include_knowledge=knowledge > 0,
@@ -697,6 +730,10 @@ def _register_routes(app: FastAPI) -> None:
         observed_at: str = Form(...),
         notes: str | None = Form(default=None),
         extractor_provider: str | None = Form(default=None),
+        # Phase 11: Swift dashboards know the CRM UUID for the active
+        # client and pass it through so the brain doesn't re-resolve
+        # the display name. Optional — name resolution still works.
+        client_org_id: str | None = Form(default=None),
     ) -> dict:
         """Phase 10: upload one file → preview (no vault write yet).
 
@@ -766,6 +803,7 @@ def _register_routes(app: FastAPI) -> None:
                 vault_root=request.app.state.vault_root,
                 provider=provider,
                 client=legacy_client,
+                client_org_id=(client_org_id or "").strip() or None,
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -816,6 +854,7 @@ def _register_routes(app: FastAPI) -> None:
                 preview=preview,
                 vault_root=request.app.state.vault_root,
                 accepted_atom_indexes=accepted,
+                crm_resolver=request.app.state.crm_resolver,
             )
         except Exception as exc:  # noqa: BLE001
             # Re-stash the preview so the user can retry without
@@ -982,6 +1021,7 @@ def _register_routes(app: FastAPI) -> None:
                 vault_root=vault,
                 provider=provider,
                 client=legacy_client,
+                crm_resolver=request.app.state.crm_resolver,
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -1034,6 +1074,7 @@ def _register_routes(app: FastAPI) -> None:
                 allow_whisper=bool(body.get("allow_whisper", False)),
                 cookies_from_browser=body.get("cookies_from_browser"),
                 extractor_provider_name=body.get("extractor_provider"),
+                crm_resolver=request.app.state.crm_resolver,
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -1065,6 +1106,46 @@ def _register_routes(app: FastAPI) -> None:
         except Exception:
             return SuggestionReferencedResponse(call_id=body.call_id, atom_id=body.atom_id, logged=False)
         return SuggestionReferencedResponse(call_id=body.call_id, atom_id=body.atom_id, logged=True)
+
+    @app.post("/suggestion_feedback", response_model=SuggestionFeedbackResponse)
+    def suggestion_feedback(
+        body: SuggestionFeedbackRequest,
+        request: Request,
+    ) -> SuggestionFeedbackResponse:
+        """Phase 11: Swift overlay posts thumbs-up / thumbs-down /
+        dismiss events here. `kind` must be one of FEEDBACK_KINDS — the
+        endpoint 400s on anything else so a typo can't quietly pollute
+        the metric.
+        """
+        if body.kind not in FEEDBACK_KINDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown feedback kind {body.kind!r}. "
+                    f"Expected one of: {', '.join(FEEDBACK_KINDS)}."
+                ),
+            )
+        vault: Path = request.app.state.vault_root
+        try:
+            _log_suggestion_feedback(
+                vault_root=vault,
+                call_id=body.call_id,
+                atom_id=body.atom_id,
+                kind=body.kind,
+            )
+        except Exception:
+            return SuggestionFeedbackResponse(
+                call_id=body.call_id,
+                atom_id=body.atom_id,
+                kind=body.kind,
+                logged=False,
+            )
+        return SuggestionFeedbackResponse(
+            call_id=body.call_id,
+            atom_id=body.atom_id,
+            kind=body.kind,
+            logged=True,
+        )
 
     # ──────────────────────────────────────────────────────────────────
     # Phase 8 item 12 + 14 — metrics + diagnostics

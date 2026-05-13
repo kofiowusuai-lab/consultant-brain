@@ -29,11 +29,29 @@ DEFAULT_ACCEPTANCE_WINDOW_SECONDS = 90
 
 @dataclass(frozen=True, slots=True)
 class AcceptanceReport:
-    """Acceptance rate overall + per layer."""
+    """Acceptance rate overall + per layer.
+
+    Phase 11 adds three explicit-feedback signals (helpful/useless/dismissed)
+    plus a stronger acceptance signal (`used_in_call`) than the legacy
+    60-90s `referenced` proxy. Rates are computed against `total_emits`
+    so all four are directly comparable to `acceptance_rate`.
+    """
 
     total_emits: int
     total_referenced: int
     acceptance_rate: float
+    # Phase 11 explicit-feedback counts. Each counts every event of the
+    # kind whose (call_id, atom_id) pair is also seen in an emit. Events
+    # without a matching emit (rare — would mean the brain restarted
+    # mid-call) are ignored so the denominator stays meaningful.
+    helpful_count: int = 0
+    useless_count: int = 0
+    dismissed_count: int = 0
+    used_count: int = 0
+    helpful_rate: float = 0.0
+    useless_rate: float = 0.0
+    dismissed_rate: float = 0.0
+    used_rate: float = 0.0
     by_layer: dict[str, float] = field(default_factory=dict)  # layer → rate
     by_layer_counts: dict[str, tuple[int, int]] = field(default_factory=dict)
     # ↑ layer → (referenced_count, emit_count)
@@ -60,9 +78,30 @@ def compute_acceptance(
     layer_emit_counts: dict[str, int] = defaultdict(int)
     layer_accept_counts: dict[str, int] = defaultdict(int)
 
-    for events_for_pair in by_pair.values():
+    # Phase 11: explicit feedback counts. Each pair contributes at most
+    # one per kind so a user double-tapping thumbs-up doesn't inflate
+    # the rate.
+    helpful_pairs: set[tuple[str, str]] = set()
+    useless_pairs: set[tuple[str, str]] = set()
+    dismissed_pairs: set[tuple[str, str]] = set()
+    used_pairs: set[tuple[str, str]] = set()
+
+    for pair_key, events_for_pair in by_pair.items():
         # Sort chronologically.
         sorted_events = sorted(events_for_pair, key=lambda e: e.timestamp)
+        has_emit = any(e.kind == "emit" for e in sorted_events)
+        # Track explicit feedback for this pair so the per-kind metric
+        # is bounded by total_emits.
+        if has_emit:
+            for e in sorted_events:
+                if e.kind == "helpful":
+                    helpful_pairs.add(pair_key)
+                elif e.kind == "useless":
+                    useless_pairs.add(pair_key)
+                elif e.kind == "dismissed":
+                    dismissed_pairs.add(pair_key)
+                elif e.kind == "used_in_call":
+                    used_pairs.add(pair_key)
         # Iterate emits; for each, look for a referenced event within
         # window_seconds AFTER it.
         for i, event in enumerate(sorted_events):
@@ -94,10 +133,25 @@ def compute_acceptance(
         accepts = layer_accept_counts.get(layer, 0)
         by_layer[layer] = accepts / emits if emits else 0.0
         by_layer_counts[layer] = (accepts, emits)
+
+    helpful_count = len(helpful_pairs)
+    useless_count = len(useless_pairs)
+    dismissed_count = len(dismissed_pairs)
+    used_count = len(used_pairs)
+    denom = float(total_emits) if total_emits else 0.0
+
     return AcceptanceReport(
         total_emits=total_emits,
         total_referenced=accepted_emits,
         acceptance_rate=rate,
+        helpful_count=helpful_count,
+        useless_count=useless_count,
+        dismissed_count=dismissed_count,
+        used_count=used_count,
+        helpful_rate=(helpful_count / denom) if denom else 0.0,
+        useless_rate=(useless_count / denom) if denom else 0.0,
+        dismissed_rate=(dismissed_count / denom) if denom else 0.0,
+        used_rate=(used_count / denom) if denom else 0.0,
         by_layer=by_layer,
         by_layer_counts=by_layer_counts,
     )

@@ -1,12 +1,22 @@
 """Suggestion event log — the substrate for the acceptance-rate metric.
 
-Two kinds of events land in `<vault>/00_System/suggestion_log.jsonl`:
+Events land in `<vault>/00_System/suggestion_log.jsonl`. `kind` is one of:
 
-  emit       — every atom returned by GET /suggestions, one per atom.
-               Includes (call_id, atom_id, layer, score, emitted_at).
-  referenced — POST /suggestion_referenced from the Swift app when the
-               consultant references the suggestion within ~60s.
-               Includes (call_id, atom_id, referenced_at).
+  emit          — every atom returned by GET /suggestions, one per atom.
+                  Includes (call_id, atom_id, layer, score, emitted_at).
+  referenced    — POST /suggestion_referenced from the Swift app when the
+                  consultant references the suggestion within ~60s.
+                  Includes (call_id, atom_id, referenced_at). Acts as the
+                  legacy "did anything happen" signal.
+  helpful       — Phase 11: user gave a thumbs-up on the atom in the
+                  overlay. Strongest positive signal.
+  useless       — Phase 11: user gave a thumbs-down. Strongest negative.
+  dismissed     — Phase 11: user swiped/closed the atom row without
+                  acting. Weak negative — they saw it, decided no.
+  used_in_call  — Phase 11: post-call (or in-call automated detector)
+                  marks the atom as actually invoked in the conversation.
+                  Stronger than `referenced` because it survives the
+                  60s acceptance window.
 
 Append-only, one JSON per line. fsync per write for durability — losing
 acceptance events silently distorts the metric.
@@ -24,16 +34,26 @@ from typing import Literal
 
 SUGGESTION_LOG_FILENAME = "suggestion_log.jsonl"
 
+# Phase 11: feedback events the user explicitly produces. Kept as a tuple
+# so /suggestion_feedback can validate input against the canonical list.
+FEEDBACK_KINDS: tuple[str, ...] = (
+    "helpful",
+    "useless",
+    "dismissed",
+    "used_in_call",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SuggestionEvent:
-    """One row in the suggestion log. `kind` discriminates emit vs reference."""
+    """One row in the suggestion log. `kind` discriminates the event class:
+    `emit` / `referenced` / one of FEEDBACK_KINDS."""
 
-    kind: Literal["emit", "referenced"]
+    kind: str
     call_id: str
     atom_id: str
-    layer: str | None  # populated on emit; None on referenced
-    score: float | None  # populated on emit; None on referenced
+    layer: str | None  # populated on emit; None on every other event
+    score: float | None  # populated on emit; None on every other event
     timestamp: str  # ISO-8601 UTC with trailing Z
 
 
@@ -76,6 +96,37 @@ def log_referenced(
         vault_root=vault_root,
         event=SuggestionEvent(
             kind="referenced",
+            call_id=call_id,
+            atom_id=atom_id,
+            layer=None,
+            score=None,
+            timestamp=_iso(now or datetime.now(timezone.utc)),
+        ),
+    )
+
+
+def log_feedback(
+    *,
+    vault_root: Path,
+    call_id: str,
+    atom_id: str,
+    kind: str,
+    now: datetime | None = None,
+) -> None:
+    """Phase 11: append one explicit user feedback event.
+
+    `kind` must be in `FEEDBACK_KINDS`. Raises `ValueError` otherwise so
+    the HTTP layer can return a clean 400 to the Swift caller instead of
+    silently corrupting the metric with arbitrary kinds.
+    """
+    if kind not in FEEDBACK_KINDS:
+        raise ValueError(
+            f"Unknown feedback kind {kind!r}. Expected one of {FEEDBACK_KINDS}."
+        )
+    _append(
+        vault_root=vault_root,
+        event=SuggestionEvent(
+            kind=kind,
             call_id=call_id,
             atom_id=atom_id,
             layer=None,

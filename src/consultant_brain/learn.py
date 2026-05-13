@@ -99,6 +99,10 @@ def run_learn(
     client: Optional[AnthropicClient] = None,
     # Tests inject a pre-built SourceMaterial to skip the network leg.
     source: Optional[SourceMaterial] = None,
+    # Phase 11: resolves `for_client` to a CRM organization UUID so
+    # every external-knowledge atom carries client_org_id when the
+    # source is tied to a client (--for-client flag).
+    crm_resolver=None,
 ) -> LearnResult:
     """Ingest one source URL into the brain.
 
@@ -173,6 +177,16 @@ def run_learn(
         base_tags.append(source.topic.lower().replace(" ", "_"))
     base_tags.append(source.kind.value)
 
+    # Phase 11: resolve UUID once for the whole learn run so every
+    # external-knowledge atom carries the same client_org_id when
+    # for-client is set. None when unset / not in CRM yet.
+    org_uuid = None
+    if crm_resolver is not None and source.for_client:
+        try:
+            org_uuid = crm_resolver.resolve_uuid(source.for_client)
+        except Exception:
+            org_uuid = None
+
     seen_last = timestamp.date()
     for index, extracted in enumerate(extractor_result.atoms):
         atom_id = derive_atom_id(
@@ -186,7 +200,7 @@ def run_learn(
                 id=atom_id,
                 type=extracted.type,
                 client=source.for_client,
-                client_org_id=None,
+                client_org_id=org_uuid,
                 call=source.source_id,
                 call_type=CallType.ai_training,  # closest analog; not a real call
                 source_kind=source.kind,

@@ -151,6 +151,11 @@ def _atoms_schema() -> pa.Schema:
             # Phase 9: source provenance — empty string for legacy rows
             # so older atoms keep matching the default "call" filter.
             pa.field("source_kind", pa.string()),
+            # Phase 11: CRM organization UUID. Empty string for atoms
+            # written before Phase 11 OR for clients not yet in the
+            # CRM. Retrieval prefers this when set; falls back to
+            # client name when empty.
+            pa.field("client_org_id", pa.string()),
         ]
     )
 
@@ -198,6 +203,7 @@ class LanceVaultIndex:
             "last_seen": atom.last_seen.isoformat(),
             "tags": list(atom.tags),
             "source_kind": atom.source_kind.value,
+            "client_org_id": str(atom.client_org_id) if atom.client_org_id else "",
         }
         table = self._table()
         # Delete-then-insert because LanceDB's merge_insert is unstable across
@@ -219,6 +225,7 @@ class LanceVaultIndex:
         *,
         top_n: int = 5,
         client_filter: str | None = None,
+        client_org_id_filter: str | None = None,
         call_type_filter: str | None = None,
         source_kind_filter: str | tuple[str, ...] | None = None,
         exclude_atom_ids: set[str] | None = None,
@@ -240,13 +247,26 @@ class LanceVaultIndex:
         # Over-fetch by 3x when filters or excludes are active so the post-
         # filter top_n is still a real top_n.
         any_filter = (
-            client_filter or call_type_filter or source_kind_filter or exclude_atom_ids
+            client_filter
+            or client_org_id_filter
+            or call_type_filter
+            or source_kind_filter
+            or exclude_atom_ids
         )
         fetch_n = top_n * 3 if any_filter else top_n
 
         search = table.search(vector).metric("cosine")
         where_clauses: list[str] = []
-        if client_filter:
+        if client_org_id_filter:
+            # Phase 11: prefer the UUID filter when supplied — survives
+            # display-name renames. Legacy rows (Phase 10 and earlier)
+            # have empty client_org_id and won't match; the caller
+            # should also pass `client_filter` as a fallback to cover
+            # those.
+            where_clauses.append(
+                f"client_org_id = '{_sql_escape(client_org_id_filter)}'"
+            )
+        elif client_filter:
             where_clauses.append(f"client = '{_sql_escape(client_filter)}'")
         if call_type_filter:
             where_clauses.append(f"call_type = '{_sql_escape(call_type_filter)}'")

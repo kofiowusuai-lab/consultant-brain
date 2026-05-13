@@ -114,6 +114,7 @@ def retrieve(
     vault_root: Path,
     now: Optional[date] = None,
     include_knowledge: bool = False,
+    client_org_id: str | None = None,
 ) -> RetrievalResult:
     """The function the CLI + future FastAPI service both call.
 
@@ -125,6 +126,10 @@ def retrieve(
     keeps externally-sourced atoms out of Hot + Warm so Memory
     surfaces only the consultant's own call history. Prep mode flips
     it to True; the knowledge layer surfaces beside warm.
+
+    Phase 11: when `client_org_id` is set, the hot layer prefers a UUID
+    match (survives display-name changes in the CRM) and falls back to
+    the name filter for pre-Phase-11 atoms that have no UUID yet.
     """
     layout = VaultLayout.for_root(vault_root)
     if not layout.system_dir.exists():
@@ -139,6 +144,7 @@ def retrieve(
     hot = _hot_layer(
         index=index,
         client=client,
+        client_org_id=client_org_id,
         transcript_window=transcript_window,
         today=today,
         include_knowledge=include_knowledge,
@@ -182,6 +188,7 @@ def _hot_layer(
     transcript_window: str,
     today: date,
     include_knowledge: bool = False,
+    client_org_id: str | None = None,
 ) -> list[RankedHit]:
     """Atoms already on file about this client, ranked by semantic relevance
     to the current transcript window so the panel surfaces the most-likely-
@@ -190,16 +197,43 @@ def _hot_layer(
 
     Phase 9: hot defaults to `source_kind=call` only — external knowledge
     tagged for this client lives in the Knowledge layer, not Memory.
+
+    Phase 11: when a `client_org_id` is supplied we run a UUID-pinned query
+    first so display-name renames don't orphan an atom from its client. The
+    name query then back-fills the pre-Phase-11 tail (atoms whose rows have
+    an empty `client_org_id` column). Hits are deduped by atom id and the
+    top HOT_LAYER_MAX wins.
     """
-    if not client or not transcript_window.strip():
+    if not client and not client_org_id:
+        return []
+    if not transcript_window.strip():
         return []
     source_filter = None if include_knowledge else ("call",)
-    raw_hits = index.query(
-        text=transcript_window,
-        client_filter=client,
-        source_kind_filter=source_filter,
-        top_n=HOT_LAYER_MAX,
-    )
+
+    primary: list[AtomHit] = []
+    if client_org_id:
+        primary = index.query(
+            text=transcript_window,
+            client_org_id_filter=client_org_id,
+            source_kind_filter=source_filter,
+            top_n=HOT_LAYER_MAX,
+        )
+
+    fallback: list[AtomHit] = []
+    if client and len(primary) < HOT_LAYER_MAX:
+        # Cover the legacy tail: atoms minted before client_org_id was
+        # populated will only match on display name. Exclude the UUID
+        # winners so we don't rank the same atom twice.
+        seen_ids = {hit.id for hit in primary}
+        fallback = index.query(
+            text=transcript_window,
+            client_filter=client,
+            source_kind_filter=source_filter,
+            exclude_atom_ids=seen_ids,
+            top_n=HOT_LAYER_MAX - len(primary),
+        )
+
+    raw_hits = [*primary, *fallback][:HOT_LAYER_MAX]
     return [
         _rank_hit(hit, layer="hot", today=today, reason="known about this client")
         for hit in raw_hits

@@ -28,6 +28,7 @@ from typing import Optional
 
 import ulid
 
+from consultant_brain.crm.resolver import CRMResolver
 from consultant_brain.schemas import (
     Atom,
     AtomStatus,
@@ -75,12 +76,19 @@ def ingest_chat_note(
     facts: list[StructuredNoteFact],
     vault_root: Path,
     observed_at: Optional[datetime] = None,
+    crm_resolver: Optional[CRMResolver] = None,
 ) -> IngestedNoteResult:
     """Persist the user's note as atoms in the vault.
 
     `facts` is the LLM-structured form of `raw_text`; if it's empty
     we still mint a single client_fact atom carrying the verbatim
     text so the chat-note ALWAYS produces something traceable.
+
+    Phase 11: `crm_resolver` resolves `client_name` to the CRM
+    organization UUID so every minted atom carries `client_org_id`.
+    Passes None silently when the resolver isn't supplied or the
+    client isn't in the CRM — atoms still write, just without the
+    stable UUID linkage.
     """
     if not facts:
         facts = [
@@ -102,6 +110,17 @@ def ingest_chat_note(
     atom_paths: list[Path] = []
     base_tags = ("chat_note", "context_dump")
 
+    # Phase 11: resolve the CRM UUID once and stamp every atom in this
+    # note with it. None when the resolver isn't supplied OR the
+    # client isn't in the CRM yet — atom still mints with client name
+    # as the fallback identifier.
+    org_uuid = None
+    if crm_resolver is not None and client_name:
+        try:
+            org_uuid = crm_resolver.resolve_uuid(client_name)
+        except Exception:
+            org_uuid = None
+
     for index, fact in enumerate(facts):
         atom_id = derive_atom_id(
             session_filename=note_id,
@@ -115,7 +134,7 @@ def ingest_chat_note(
             id=atom_id,
             type=fact.type,
             client=client_name,
-            client_org_id=None,
+            client_org_id=org_uuid,
             call=note_id,
             # Closest analog — chat notes aren't real calls so we use
             # consulting_call as the bucket. Retrieval's call_type
