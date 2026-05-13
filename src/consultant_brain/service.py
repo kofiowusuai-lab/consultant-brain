@@ -35,7 +35,10 @@ from fastapi import (
 from pydantic import BaseModel, Field
 
 from consultant_brain.briefs import (
+    ChatTurn as _ChatTurn,
     ClientBrief,
+    ClientBriefAnswer,
+    ask_about_client as _ask_about_client,
     generate_client_brief as _generate_client_brief,
     load_cached_brief as _load_cached_brief,
 )
@@ -826,6 +829,85 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         return brief.to_dict()
+
+    @app.post("/client_brief/ask")
+    def client_brief_ask_endpoint(body: dict, request: Request) -> dict:
+        """Answer one follow-up question about a client.
+
+        Body shape:
+          {
+            "client_name": "Reece",
+            "question": "What was the deadline he mentioned?",
+            "history": [
+              { "role": "user", "content": "..." },
+              { "role": "assistant", "content": "..." }
+            ]
+          }
+
+        The history field is optional. The brain caps it at 6 most-
+        recent turns server-side so long threads don't blow the
+        prompt budget.
+        """
+        client_name = (body or {}).get("client_name") or (body or {}).get("client")
+        question = (body or {}).get("question")
+        if not isinstance(client_name, str) or not client_name.strip():
+            raise HTTPException(status_code=400, detail="`client_name` is required")
+        if not isinstance(question, str) or not question.strip():
+            raise HTTPException(status_code=400, detail="`question` is required")
+
+        history_raw = body.get("history") or []
+        if not isinstance(history_raw, list):
+            raise HTTPException(status_code=400, detail="`history` must be a list")
+        history: list[_ChatTurn] = []
+        for entry in history_raw:
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("role", "")).strip().lower()
+            content = str(entry.get("content", "")).strip()
+            if role not in ("user", "assistant") or not content:
+                continue
+            history.append(_ChatTurn(role=role, content=content))
+
+        # Provider selection mirrors /client_brief.
+        provider = None
+        try:
+            provider = _get_extractor_provider(request.app)
+        except Exception:
+            provider = None
+
+        legacy_client = None
+        if provider is None:
+            from consultant_brain.extractor import real_anthropic_client
+            from consultant_brain.secrets import (
+                SecretNotFoundError,
+                get_anthropic_key,
+            )
+
+            try:
+                legacy_client = real_anthropic_client(get_anthropic_key())
+            except SecretNotFoundError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        vault: Path = request.app.state.vault_root
+        try:
+            answer: ClientBriefAnswer = _ask_about_client(
+                client_name=client_name.strip(),
+                question=question.strip(),
+                history=history,
+                vault_root=vault,
+                provider=provider,
+                client=legacy_client,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        return {
+            "answer": answer.answer,
+            "atoms_consulted": answer.atoms_consulted,
+            "calls_consulted": answer.calls_consulted,
+            "dumps_consulted": answer.dumps_consulted,
+            "model_used": answer.model_used,
+        }
 
     # ──────────────────────────────────────────────────────────────────
     # Phase 9 — learn from external sources (YouTube / Instagram)

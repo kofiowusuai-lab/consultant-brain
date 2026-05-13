@@ -18,12 +18,20 @@ from consultant_brain.briefs.generator import (
     generate_client_brief,
     load_cached_brief,
 )
+from consultant_brain.briefs.qa import (
+    ChatTurn,
+    ClientBriefAnswer,
+    ask_about_client,
+)
 
 __all__ = [
+    "ChatTurn",
     "ClientBrief",
+    "ClientBriefAnswer",
     "ClientBriefCommitment",
     "ClientBriefMeta",
     "ClientBriefObjection",
+    "ask_about_client",
     "generate_client_brief",
     "load_cached_brief",
 ]
