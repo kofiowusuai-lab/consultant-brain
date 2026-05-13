@@ -242,6 +242,20 @@ class SuggestionFeedbackResponse(BaseModel):
     logged: bool
 
 
+class FacilitatorStageSuggestionResponse(BaseModel):
+    """Phase 13: response shape for GET /facilitator/suggest_stage.
+
+    `suggested_stage_index` is null when the suggestor abstained
+    (empty window, end of outline, not enough signal). The Swift
+    side renders the toast only when an index is present.
+    """
+
+    call_id: str
+    suggested_stage_index: int | None
+    confidence: float
+    reason: str
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # App factory
 # ────────────────────────────────────────────────────────────────────────────
@@ -1145,6 +1159,49 @@ def _register_routes(app: FastAPI) -> None:
             atom_id=body.atom_id,
             kind=body.kind,
             logged=True,
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Phase 13 — facilitator console stage suggestor
+    # ──────────────────────────────────────────────────────────────────
+
+    @app.get(
+        "/facilitator/suggest_stage",
+        response_model=FacilitatorStageSuggestionResponse,
+    )
+    def facilitator_suggest_stage(
+        request: Request,
+        call_id: str = Query(..., min_length=1),
+        current_stage_index: int = Query(0, ge=0, le=99),
+    ) -> FacilitatorStageSuggestionResponse:
+        """Phase 13: peek at the rolling transcript window for the
+        named call and return a deterministic next-stage hint when
+        the conversation cues a transition. The Swift side polls this
+        every 8s while the facilitator console is visible; the user
+        always confirms before any stage actually advances.
+
+        404 when the call_id has no live state — the Swift side falls
+        back to manual ←/→ navigation in that case.
+        """
+        from consultant_brain.facilitator.suggestor import suggest_next_stage
+
+        registry: LiveCallRegistry = request.app.state.registry
+        state = registry.get(call_id)
+        if state is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active call with id={call_id!r}. POST /call_start first.",
+            )
+        window = state.transcript_window()
+        result = suggest_next_stage(
+            transcript_window=window,
+            current_stage_index=current_stage_index,
+        )
+        return FacilitatorStageSuggestionResponse(
+            call_id=call_id,
+            suggested_stage_index=result.suggested_index,
+            confidence=result.confidence,
+            reason=result.reason,
         )
 
     # ──────────────────────────────────────────────────────────────────

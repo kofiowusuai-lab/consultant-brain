@@ -54,6 +54,12 @@ FEEDBACK_KINDS: tuple[str, ...] = (
     "expanded",
     "copied",
     "followup_created",
+    # Phase 13 facilitator console events.  Logged with a synthetic
+    # atom_id of the form "facilitator_stage_<n>" so the existing
+    # /suggestion_feedback validator + acceptance aggregator handle
+    # them without a new endpoint or new aggregator code path.
+    "facilitator_advance_accepted",
+    "facilitator_advance_dismissed",
 )
 
 
